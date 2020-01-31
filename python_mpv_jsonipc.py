@@ -60,6 +60,7 @@ class MPVInter:
         self.socket.start()
         self.command_id = 0
         self.rid_lock = threading.Lock()
+        self.socket_lock = threading.Lock()
         self.cid_result = {}
         self.cid_wait = {}
     
@@ -84,8 +85,12 @@ class MPVInter:
 
         command_list = [command]
         command_list.extend(args)
-        self.socket.send({"command":command_list, "request_id": command_id})
-        
+        try:
+            self.socket_lock.acquire()
+            self.socket.send({"command":command_list, "request_id": command_id})
+        finally:
+            self.socket_lock.release()
+
         has_event = event.wait(timeout=TIMEOUT)
         if has_event:
             data = self.cid_result[command_id]
