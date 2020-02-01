@@ -4,6 +4,7 @@ import json
 import os
 import time
 import subprocess
+import random
 
 if os.name == "nt":
     from .win32_named_pipe import Win32Pipe
@@ -18,7 +19,7 @@ class WindowsSocket(threading.Thread):
     def __init__(self, ipc_socket, callback=None):
         self.ipc_socket = ipc_socket
         self.callback = callback
-        self.socket = None
+        self.socket = Win32Pipe(self.ipc_socket, client=True)
 
         if self.callback is None:
             self.callback = lambda data: None
@@ -35,7 +36,6 @@ class WindowsSocket(threading.Thread):
 
     def run(self):
         data = b''
-        self.socket = Win32Pipe(self.ipc_socket, client=True)
         try:
             while True:
                 current_data = self.socket.read(2048)
@@ -46,8 +46,11 @@ class WindowsSocket(threading.Thread):
                 if data[-1] != 10:
                     continue
 
-                json_data = json.loads(data)
-                self.callback(json_data)
+                for item in data.split(b'\n'):
+                    if item == '':
+                        continue
+                    json_data = json.loads(data)
+                    self.callback(json_data)
                 data = b''
         except BrokenPipeError:
             pass
@@ -56,7 +59,8 @@ class UnixSocket(threading.Thread):
     def __init__(self, ipc_socket, callback=None):
         self.ipc_socket = ipc_socket
         self.callback = callback
-        self.socket = None
+        self.socket = socket.socket(socket.AF_UNIX)
+        self.socket.connect(self.ipc_socket)
 
         if self.callback is None:
             self.callback = lambda data: None
@@ -73,8 +77,6 @@ class UnixSocket(threading.Thread):
         self.socket.send(json.dumps(data).encode('utf-8') + b'\n')
 
     def run(self):
-        self.socket = socket.socket(socket.AF_UNIX)
-        self.socket.connect(self.ipc_socket)
         data = b''
         while True:
             current_data = self.socket.recv(1024)
@@ -85,8 +87,11 @@ class UnixSocket(threading.Thread):
             if data[-1] != 10:
                 continue
 
-            json_data = json.loads(data)
-            self.callback(json_data)
+            for item in data.split(b'\n'):
+                if item == '':
+                    continue
+                json_data = json.loads(data)
+                self.callback(json_data)
             data = b''
 
 class MPVProcess:
@@ -175,3 +180,47 @@ class MPVInter:
         else:
             raise TimeoutError("No response from MPV.")
 
+class MPV:
+    def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None, **kwargs):
+        self.properties = {}
+        self.mpv_process = None
+        if ipc_socket is None:
+            rand_file = "mpv{0}".format(random.randint(0, 2**48))
+            if os.name == "nt":
+                ipc_socket = rand_file
+            else:
+                ipc_socket = "/tmp/{0}".format(rand_file)
+
+        if start_mpv:
+            self.mpv_process = MPVProcess(ipc_socket, mpv_location, **kwargs)
+
+        self.mpv_inter = MPVInter(ipc_socket, self._callback)
+        self.properties = set(x.replace("-", "_") for x in self.command("get_property", "property-list"))
+        for command in self.command("get_property", "command-list"):
+            def wrapper(*args):
+                self.command(command, *args)
+            object.__setattr__(self, command["name"].replace("-", "_"), wrapper)
+
+        self._dir = list(self.properties)
+        self._dir.extend(object.__dir__(self))
+
+    def _callback(self, event, data):
+        pass
+
+    def command(self, command, *args):
+        return self.mpv_inter.command(command, *args)
+
+    def __getattr__(self, name):
+        if name in self.properties:
+            return self.command("get_property", name.replace("_", "-"))
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name, value):
+        if name not in {"properties", "command"} and name in self.properties:
+            return self.command("set_property", name.replace("_", "-"), value)
+        return object.__setattr__(self, name, value)
+
+    def __dir__(self):
+        return self._dir
+
+#osd_sym_cc
