@@ -223,4 +223,6 @@ class MPV:
     def __dir__(self):
         return self._dir
 
-#osd_sym_cc
+#osd_sym_cc - Invalid, need to fix JSON
+#property unavailable -> None
+#property not found
