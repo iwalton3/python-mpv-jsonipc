@@ -46,6 +46,7 @@ class WindowsSocket(threading.Thread):
                 if data[-1] != 10:
                     continue
 
+                data = data.decode('utf-8', 'ignore').encode('utf-8')
                 for item in data.split(b'\n'):
                     if item == '':
                         continue
@@ -87,6 +88,7 @@ class UnixSocket(threading.Thread):
             if data[-1] != 10:
                 continue
 
+            data = data.decode('utf-8', 'ignore').encode('utf-8')
             for item in data.split(b'\n'):
                 if item == '':
                     continue
@@ -174,6 +176,8 @@ class MPVInter:
             del self.cid_result[command_id]
             del self.cid_wait[command_id]
             if data["error"] != "success":
+                if data["error"] == "property unavailable":
+                    return None
                 raise MPVError(data["error"])
             else:
                 return data["data"]
@@ -222,7 +226,3 @@ class MPV:
 
     def __dir__(self):
         return self._dir
-
-#osd_sym_cc - Invalid, need to fix JSON
-#property unavailable -> None
-#property not found
