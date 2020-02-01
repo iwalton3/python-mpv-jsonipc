@@ -1,4 +1,5 @@
 from setuptools import setup
+import os
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
@@ -13,7 +14,7 @@ setup(
     long_description=open('README.md').read(),
     long_description_content_type="text/markdown",
     url="https://github.com/iwalton3/python-mpv-jsonipc",
-    py_modules=['python_mpv_jsonipc'],
+    packages=['python_mpv_jsonipc'],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",

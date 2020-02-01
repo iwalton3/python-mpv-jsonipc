@@ -2,12 +2,55 @@ import threading
 import socket
 import json
 import os
+import time
+import subprocess
+
+if os.name == "nt":
+    from .win32_named_pipe import Win32Pipe
 
 TIMEOUT = 120
 
 class MPVError(Exception):
     def __init__(self, *args, **kwargs):
         super(MPVError, self).__init__(*args, **kwargs)
+
+class WindowsSocket(threading.Thread):
+    def __init__(self, ipc_socket, callback=None):
+        self.ipc_socket = ipc_socket
+        self.callback = callback
+        self.socket = None
+
+        if self.callback is None:
+            self.callback = lambda data: None
+
+        threading.Thread.__init__(self)
+
+    def stop(self):
+        if self.socket is not None:
+            self.socket.close()
+        self.join()
+
+    def send(self, data):
+        self.socket.write(json.dumps(data).encode('utf-8') + b'\n')
+
+    def run(self):
+        data = b''
+        self.socket = Win32Pipe(self.ipc_socket, client=True)
+        try:
+            while True:
+                current_data = self.socket.read(2048)
+                if current_data == b'':
+                    break
+
+                data += current_data
+                if data[-1] != 10:
+                    continue
+
+                json_data = json.loads(data)
+                self.callback(json_data)
+                data = b''
+        except BrokenPipeError:
+            pass
 
 class UnixSocket(threading.Thread):
     def __init__(self, ipc_socket, callback=None):
@@ -46,11 +89,40 @@ class UnixSocket(threading.Thread):
             self.callback(json_data)
             data = b''
 
+class MPVProcess:
+    def __init__(self, ipc_socket, mpv_location=None, **kwargs):
+        if mpv_location is None:
+            if os.name == 'nt':
+                mpv_location = "mpv.exe"
+            else:
+                mpv_location = "mpv"
+        
+        if os.name == 'nt':
+            ipc_socket = "\\\\.\\pipe\\" + ipc_socket
+
+        if os.path.exists(ipc_socket):
+            os.remove(ipc_socket)
+
+        args = [mpv_location]
+        args.extend("--{0}={1}".format(*v) for v in kwargs.items())        
+        self.process = subprocess.Popen(args)
+        for _ in range(20):
+            time.sleep(0.1)
+            self.process.poll()
+            if os.path.exists(ipc_socket) or self.process.returncode is not None:
+                break
+        
+        if not os.path.exists(ipc_socket) or self.process.returncode is not None:
+            raise MPVError("MPV not started.")
+
+    def stop(self):
+        self.process.terminate()
+
 class MPVInter:
     def __init__(self, ipc_socket, callback=None):
         Socket = UnixSocket
         if os.name == 'nt':
-            pass
+            Socket = WindowsSocket
 
         self.callback = callback
         if self.callback is None:
@@ -102,3 +174,4 @@ class MPVInter:
                 return data["data"]
         else:
             raise TimeoutError("No response from MPV.")
+
