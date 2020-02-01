@@ -118,7 +118,7 @@ class MPVProcess:
         if os.name == 'nt':
             ipc_socket = "\\\\.\\pipe\\" + ipc_socket
 
-        if os.path.exists(ipc_socket):
+        if os.name != 'nt' and os.path.exists(ipc_socket):
             os.remove(ipc_socket)
 
         self.ipc_socket = ipc_socket
@@ -153,7 +153,8 @@ class MPVProcess:
 
     def stop(self):
         self.process.terminate()
-        os.remove(self.ipc_socket)
+        if os.name != 'nt' and os.path.exists(self.ipc_socket):
+            os.remove(self.ipc_socket)
 
 class MPVInter:
     def __init__(self, ipc_socket, callback=None):
