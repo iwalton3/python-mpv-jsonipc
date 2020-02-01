@@ -13,7 +13,7 @@ Please note that this only implements the subset of `python-mpv` that is used by
 
 ## Installation
 
-```python
+```bash
 sudo pip3 install python-mpv-jsonrpc
 ```
 
