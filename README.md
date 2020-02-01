@@ -5,9 +5,6 @@ you can control external instances of MPV including players like SMPlayer, and i
 instead of needing `libmpv1`. It may also be more resistant to crashes such as Segmentation Faults, but since it isn't
 directly communicating with MPV via the C API the performance will be worse.
 
-The win32_named_pipe module is from [KomodoEdit](https://github.com/Komodo/KomodoEdit) and is available
-under the terms of the Mozilla Public License.
-
 Please note that this only implements the subset of `python-mpv` that is used by `plex-mpv-shim` and
 `jellyfin-mpv-shim`. Other functionality has not been implemented.
 

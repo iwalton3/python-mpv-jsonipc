@@ -9,6 +9,9 @@ import traceback
 import queue
 
 if os.name == "nt":
+    # Need to find alternative to Win32Pipe, as
+    # it is licensed under MPL 1.1 which is incompatible
+    # with the GPL used by downstream software.
     from .win32_named_pipe import Win32Pipe
 
 TIMEOUT = 120
