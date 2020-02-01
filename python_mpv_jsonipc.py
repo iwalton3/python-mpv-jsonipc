@@ -9,10 +9,8 @@ import traceback
 import queue
 
 if os.name == "nt":
-    # Need to find alternative to Win32Pipe, as
-    # it is licensed under MPL 1.1 which is incompatible
-    # with the GPL used by downstream software.
-    from .win32_named_pipe import Win32Pipe
+    import _winapi
+    from multiprocessing.connection import PipeConnection
 
 TIMEOUT = 120
 
@@ -22,9 +20,16 @@ class MPVError(Exception):
 
 class WindowsSocket(threading.Thread):
     def __init__(self, ipc_socket, callback=None):
-        self.ipc_socket = ipc_socket
+        ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
-        self.socket = Win32Pipe(self.ipc_socket, client=True)
+        
+        openmode = _winapi.PIPE_ACCESS_DUPLEX
+        access = _winapi.GENERIC_READ | _winapi.GENERIC_WRITE
+        pipe_handle = _winapi.CreateFile(
+            ipc_socket, access, 0, _winapi.NULL, _winapi.OPEN_EXISTING,
+            _winapi.FILE_FLAG_OVERLAPPED, _winapi.NULL
+            )
+        self.socket = PipeConnection(pipe_handle)
 
         if self.callback is None:
             self.callback = lambda data: None
@@ -37,13 +42,13 @@ class WindowsSocket(threading.Thread):
         self.join()
 
     def send(self, data):
-        self.socket.write(json.dumps(data).encode('utf-8') + b'\n')
+        self.socket.send_bytes(json.dumps(data).encode('utf-8') + b'\n')
 
     def run(self):
         data = b''
         try:
             while True:
-                current_data = self.socket.read(2048)
+                current_data = self.socket.recv_bytes(2048)
                 if current_data == b'':
                     break
 
@@ -53,7 +58,7 @@ class WindowsSocket(threading.Thread):
 
                 data = data.decode('utf-8', 'ignore').encode('utf-8')
                 for item in data.split(b'\n'):
-                    if item == '':
+                    if item == b'':
                         continue
                     json_data = json.loads(item)
                     self.callback(json_data)
