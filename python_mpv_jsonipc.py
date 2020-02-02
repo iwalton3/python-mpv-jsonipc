@@ -178,7 +178,7 @@ class MPVInter:
         
         self.socket = Socket(ipc_socket, self.event_callback)
         self.socket.start()
-        self.command_id = 0
+        self.command_id = 1
         self.rid_lock = threading.Lock()
         self.socket_lock = threading.Lock()
         self.cid_result = {}
@@ -274,9 +274,9 @@ class MPV:
         self._dir = list(self.properties)
         self._dir.extend(object.__dir__(self))
 
-        self.observer_id = 0
+        self.observer_id = 1
         self.observer_lock = threading.Lock()
-        self.keybind_id = 0
+        self.keybind_id = 1
         self.keybind_lock = threading.Lock()
         
         @self.on_event("property-change")
