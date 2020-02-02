@@ -63,7 +63,7 @@ class WindowsSocket(threading.Thread):
                     json_data = json.loads(item)
                     self.callback(json_data)
                 data = b''
-        except BrokenPipeError:
+        except EOFError:
             pass
 
 class UnixSocket(threading.Thread):
@@ -130,6 +130,7 @@ class MPVProcess:
         args.extend("--{0}={1}".format(v[0].replace("_", "-"), self._mpv_fmt(v[1]))
                     for v in kwargs.items())
         self.process = subprocess.Popen(args)
+        time.sleep(1)
         for _ in range(20):
             time.sleep(0.1)
             self.process.poll()
