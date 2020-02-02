@@ -25,10 +25,18 @@ class WindowsSocket(threading.Thread):
         
         openmode = _winapi.PIPE_ACCESS_DUPLEX
         access = _winapi.GENERIC_READ | _winapi.GENERIC_WRITE
-        pipe_handle = _winapi.CreateFile(
-            ipc_socket, access, 0, _winapi.NULL, _winapi.OPEN_EXISTING,
-            _winapi.FILE_FLAG_OVERLAPPED, _winapi.NULL
-            )
+        limit = 5 # Connection may fail at first. Try 5 times.
+        for _ in range(5):
+            try:
+                pipe_handle = _winapi.CreateFile(
+                    ipc_socket, access, 0, _winapi.NULL, _winapi.OPEN_EXISTING,
+                    _winapi.FILE_FLAG_OVERLAPPED, _winapi.NULL
+                    )
+                break
+            except OSError:
+                time.sleep(1)
+        else:
+            raise MPVError("Cannot connect to pipe.")
         self.socket = PipeConnection(pipe_handle)
 
         if self.callback is None:
@@ -138,6 +146,7 @@ class MPVProcess:
                 break
         
         if not os.path.exists(ipc_socket) or self.process.returncode is not None:
+            print("dead", os.path.exists(ipc_socket), self.process.returncode)
             raise MPVError("MPV not started.")
 
     def _set_default(self, prop_dict, key, value):
