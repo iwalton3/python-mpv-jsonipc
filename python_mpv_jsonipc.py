@@ -301,6 +301,10 @@ class MPV:
             return func
         return wrapper
 
+    # Added for compatibility.
+    def event_callback(self, name):
+        return self.on_event(name)
+
     def on_key_press(self, name):
         def wrapper(func):
             self.bind_key_press(name, func)
