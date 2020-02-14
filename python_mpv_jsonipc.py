@@ -14,6 +14,20 @@ if os.name == "nt":
 
 TIMEOUT = 120
 
+# Older MPV versions do not allow us to dynamically retrieve the command list.
+FALLBACK_COMMAND_LIST = [
+    'ignore', 'seek', 'revert-seek', 'quit', 'quit-watch-later', 'stop', 'frame-step', 'frame-back-step',
+    'playlist-next', 'playlist-prev', 'playlist-shuffle', 'playlist-unshuffle', 'sub-step', 'sub-seek',
+    'print-text', 'show-text', 'expand-text', 'expand-path', 'show-progress', 'sub-add', 'audio-add',
+    'video-add', 'sub-remove', 'audio-remove', 'video-remove', 'sub-reload', 'audio-reload', 'video-reload',
+    'rescan-external-files', 'screenshot', 'screenshot-to-file', 'screenshot-raw', 'loadfile', 'loadlist',
+    'playlist-clear', 'playlist-remove', 'playlist-move', 'run', 'subprocess', 'set', 'change-list', 'add',
+    'cycle', 'multiply', 'cycle-values', 'enable-section', 'disable-section', 'define-section', 'ab-loop',
+    'drop-buffers', 'af', 'vf', 'af-command', 'vf-command', 'ao-reload', 'script-binding', 'script-message',
+    'script-message-to', 'overlay-add', 'overlay-remove', 'osd-overlay', 'write-watch-later-config',
+    'hook-add', 'hook-ack', 'mouse', 'keybind', 'keypress', 'keydown', 'keyup', 'apply-profile',
+    'load-script', 'dump-cache', 'ab-loop-dump-cache', 'ab-loop-align-cache']
+
 class MPVError(Exception):
     def __init__(self, *args, **kwargs):
         super(MPVError, self).__init__(*args, **kwargs)
@@ -267,7 +281,11 @@ class MPV:
 
         self.mpv_inter = MPVInter(ipc_socket, self._callback)
         self.properties = set(x.replace("-", "_") for x in self.command("get_property", "property-list"))
-        for command in self.command("get_property", "command-list"):
+        try:
+            command_list = self.command("get_property", "command-list")
+        except MPVError:
+            command_list = FALLBACK_COMMAND_LIST
+        for command in command_list:
             object.__setattr__(self, command["name"].replace("-", "_"), self._get_wrapper(command["name"]))
 
         self._dir = list(self.properties)
