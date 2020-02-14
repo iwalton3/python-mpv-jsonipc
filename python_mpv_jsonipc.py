@@ -334,8 +334,12 @@ class MPV:
         self.keybind_id += 1
         self.keybind_lock.release()
 
+        bind_name = "bind{0}".format(keybind_id)
         self.key_bindings["bind{0}".format(keybind_id)] = callback
-        self.keybind(name, "script-message custom-bind bind{0}".format(keybind_id))
+        try:
+            self.keybind(name, "script-message custom-bind {0}".format(bind_name))
+        except MPVError:
+            self.define_section(bind_name, "{0} script-message custom-bind {1}".format(name, bind_name))
 
     def bind_property_observer(self, name, callback):
         self.observer_lock.acquire()
