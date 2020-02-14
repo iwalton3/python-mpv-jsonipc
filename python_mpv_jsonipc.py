@@ -340,6 +340,7 @@ class MPV:
             self.keybind(name, "script-message custom-bind {0}".format(bind_name))
         except MPVError:
             self.define_section(bind_name, "{0} script-message custom-bind {1}".format(name, bind_name))
+            self.enable_section(bind_name)
 
     def bind_property_observer(self, name, callback):
         self.observer_lock.acquire()
