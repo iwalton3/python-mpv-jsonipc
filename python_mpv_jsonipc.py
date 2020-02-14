@@ -146,7 +146,6 @@ class MPVProcess:
                 break
         
         if not os.path.exists(ipc_socket) or self.process.returncode is not None:
-            print("dead", os.path.exists(ipc_socket), self.process.returncode)
             raise MPVError("MPV not started.")
 
     def _set_default(self, prop_dict, key, value):
