@@ -282,11 +282,11 @@ class MPV:
         self.mpv_inter = MPVInter(ipc_socket, self._callback)
         self.properties = set(x.replace("-", "_") for x in self.command("get_property", "property-list"))
         try:
-            command_list = self.command("get_property", "command-list")
+            command_list = [x["name"] for x in self.command("get_property", "command-list")]
         except MPVError:
             command_list = FALLBACK_COMMAND_LIST
         for command in command_list:
-            object.__setattr__(self, command["name"].replace("-", "_"), self._get_wrapper(command["name"]))
+            object.__setattr__(self, command.replace("-", "_"), self._get_wrapper(command))
 
         self._dir = list(self.properties)
         self._dir.extend(object.__dir__(self))
