@@ -5,8 +5,10 @@ import os
 import time
 import subprocess
 import random
-import traceback
 import queue
+import logging
+
+log = logging.getLogger('mpv-jsonipc')
 
 if os.name == "nt":
     import _winapi
@@ -37,10 +39,9 @@ class WindowsSocket(threading.Thread):
         ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
         
-        openmode = _winapi.PIPE_ACCESS_DUPLEX
         access = _winapi.GENERIC_READ | _winapi.GENERIC_WRITE
         limit = 5 # Connection may fail at first. Try 5 times.
-        for _ in range(5):
+        for _ in range(limit):
             try:
                 pipe_handle = _winapi.CreateFile(
                     ipc_socket, access, 0, _winapi.NULL, _winapi.OPEN_EXISTING,
@@ -136,6 +137,7 @@ class MPVProcess:
             else:
                 mpv_location = "mpv"
         
+        log.debug("Staring MPV from {0}.".format(mpv_location))
         ipc_socket_name = ipc_socket
         if os.name == 'nt':
             ipc_socket = "\\\\.\\pipe\\" + ipc_socket
@@ -143,6 +145,7 @@ class MPVProcess:
         if os.name != 'nt' and os.path.exists(ipc_socket):
             os.remove(ipc_socket)
 
+        log.debug("Using IPC socket {0} for MPV.".format(ipc_socket))
         self.ipc_socket = ipc_socket
         args = [mpv_location]
         self._set_default(kwargs, "idle", True)
@@ -152,14 +155,14 @@ class MPVProcess:
         args.extend("--{0}={1}".format(v[0].replace("_", "-"), self._mpv_fmt(v[1]))
                     for v in kwargs.items())
         self.process = subprocess.Popen(args)
-        time.sleep(1)
-        for _ in range(20):
+        for _ in range(100): # Give MPV 10 seconds to start.
             time.sleep(0.1)
             self.process.poll()
             if os.path.exists(ipc_socket) or self.process.returncode is not None:
                 break
         
         if not os.path.exists(ipc_socket) or self.process.returncode is not None:
+            self.process.terminate()
             raise MPVError("MPV not started.")
 
     def _set_default(self, prop_dict, key, value):
@@ -257,8 +260,8 @@ class EventHandler(threading.Thread):
                 break
             try:
                 event[0](*event[1])
-            except:
-                traceback.print_exc()
+            except Exception:
+                log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
 
 class MPV:
     def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None, **kwargs):
@@ -277,13 +280,23 @@ class MPV:
                 ipc_socket = "/tmp/{0}".format(rand_file)
 
         if start_mpv:
-            self.mpv_process = MPVProcess(ipc_socket, mpv_location, **kwargs)
+            # Attempt to start MPV 3 times.
+            for i in range(3):
+                try:
+                    self.mpv_process = MPVProcess(ipc_socket, mpv_location, **kwargs)
+                    break
+                except MPVError:
+                    log.warning("MPV start failed.", exc_info=1)
+                    continue
+            else:
+                raise MPVError("MPV process retry limit reached.")
 
         self.mpv_inter = MPVInter(ipc_socket, self._callback)
         self.properties = set(x.replace("-", "_") for x in self.command("get_property", "property-list"))
         try:
             command_list = [x["name"] for x in self.command("get_property", "command-list")]
         except MPVError:
+            log.warning("Using fallback command list.")
             command_list = FALLBACK_COMMAND_LIST
         for command in command_list:
             object.__setattr__(self, command.replace("-", "_"), self._get_wrapper(command))
