@@ -264,7 +264,7 @@ class EventHandler(threading.Thread):
                 log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
 
 class MPV:
-    def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None, **kwargs):
+    def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, **kwargs):
         self.properties = {}
         self.event_bindings = {}
         self.key_bindings = {}
@@ -309,6 +309,12 @@ class MPV:
         self.keybind_id = 1
         self.keybind_lock = threading.Lock()
         
+        if log_handler is not None and loglevel is not None:
+            self.command("request_log_messages", loglevel)
+            @self.on_event("log-message")
+            def log_handler_event(data):
+                self.event_handler.put_task(log_handler, data["level"], data["prefix"], data["text"].strip())
+
         @self.on_event("property-change")
         def event_handler(data):
             if data.get("id") in self.property_bindings:
