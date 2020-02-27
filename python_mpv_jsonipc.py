@@ -155,13 +155,21 @@ class MPVProcess:
         args.extend("--{0}={1}".format(v[0].replace("_", "-"), self._mpv_fmt(v[1]))
                     for v in kwargs.items())
         self.process = subprocess.Popen(args)
+        ipc_exists = False
         for _ in range(100): # Give MPV 10 seconds to start.
             time.sleep(0.1)
             self.process.poll()
-            if os.path.exists(ipc_socket) or self.process.returncode is not None:
+            if os.path.exists(ipc_socket):
+                ipc_exists = True
+                log.debug("Found MPV socket.")
                 break
+            if self.process.returncode is not None:
+                log.error("MPV failed with returncode {0}.".format(self.process.returncode))
+                break
+        else:
+            raise MPVError("MPV start timed out.")
         
-        if not os.path.exists(ipc_socket) or self.process.returncode is not None:
+        if not ipc_exists or self.process.returncode is not None:
             self.process.terminate()
             raise MPVError("MPV not started.")
 
