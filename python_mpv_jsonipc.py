@@ -167,6 +167,7 @@ class MPVProcess:
                 log.error("MPV failed with returncode {0}.".format(self.process.returncode))
                 break
         else:
+            self.process.terminate()
             raise MPVError("MPV start timed out.")
         
         if not ipc_exists or self.process.returncode is not None:
