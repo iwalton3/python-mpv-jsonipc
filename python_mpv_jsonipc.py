@@ -31,11 +31,23 @@ FALLBACK_COMMAND_LIST = [
     'load-script', 'dump-cache', 'ab-loop-dump-cache', 'ab-loop-align-cache']
 
 class MPVError(Exception):
+    """An error originating from MPV or due to a problem with MPV."""
     def __init__(self, *args, **kwargs):
         super(MPVError, self).__init__(*args, **kwargs)
 
 class WindowsSocket(threading.Thread):
+    """
+    Wraps a Windows named pipe in a high-level interface. (Internal)
+    
+    Data is automatically encoded and decoded as JSON. The callback
+    function will be called for each inbound message.
+    """
     def __init__(self, ipc_socket, callback=None):
+        """Create the wrapper.
+
+        *ipc_socket* is the pipe name. (Not including \\\\.\\pipe\\)
+        *callback(json_data)* is the function for recieving events.
+        """
         ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
         
@@ -60,14 +72,17 @@ class WindowsSocket(threading.Thread):
         threading.Thread.__init__(self)
 
     def stop(self):
+        """Terminate the thread."""
         if self.socket is not None:
             self.socket.close()
         self.join()
 
     def send(self, data):
+        """Send *data* to the pipe, encoded as JSON."""
         self.socket.send_bytes(json.dumps(data).encode('utf-8') + b'\n')
 
     def run(self):
+        """Process pipe events. Do not run this directly. Use *start*."""
         data = b''
         try:
             while True:
@@ -90,7 +105,18 @@ class WindowsSocket(threading.Thread):
             pass
 
 class UnixSocket(threading.Thread):
+    """
+    Wraps a Unix/Linux socket in a high-level interface. (Internal)
+    
+    Data is automatically encoded and decoded as JSON. The callback
+    function will be called for each inbound message.
+    """
     def __init__(self, ipc_socket, callback=None):
+        """Create the wrapper.
+
+        *ipc_socket* is the path to the socket.
+        *callback(json_data)* is the function for recieving events.
+        """
         self.ipc_socket = ipc_socket
         self.callback = callback
         self.socket = socket.socket(socket.AF_UNIX)
@@ -102,15 +128,18 @@ class UnixSocket(threading.Thread):
         threading.Thread.__init__(self)
 
     def stop(self):
+        """Terminate the thread."""
         if self.socket is not None:
             self.socket.shutdown(socket.SHUT_WR)
             self.socket.close()
         self.join()
 
     def send(self, data):
+        """Send *data* to the socket, encoded as JSON."""
         self.socket.send(json.dumps(data).encode('utf-8') + b'\n')
 
     def run(self):
+        """Process socket events. Do not run this directly. Use *start*."""
         data = b''
         while True:
             current_data = self.socket.recv(1024)
@@ -130,7 +159,18 @@ class UnixSocket(threading.Thread):
             data = b''
 
 class MPVProcess:
+    """
+    Manages an MPV process, ensuring the socket or pipe is available. (Internal)
+    """
     def __init__(self, ipc_socket, mpv_location=None, **kwargs):
+        """
+        Create and start the MPV process. Will block until socket/pipe is available.
+
+        *ipc_socket* is the path to the Unix/Linux socket or name of the Windows pipe.
+        *mpv_location* is the path to mpv. If left unset it tries the one in the PATH.
+
+        All other arguments are forwarded to MPV as command-line arguments.
+        """
         if mpv_location is None:
             if os.name == 'nt':
                 mpv_location = "mpv.exe"
@@ -187,12 +227,21 @@ class MPVProcess:
             return data
 
     def stop(self):
+        """Terminate the process."""
         self.process.terminate()
         if os.name != 'nt' and os.path.exists(self.ipc_socket):
             os.remove(self.ipc_socket)
 
 class MPVInter:
+    """
+    Low-level interface to MPV. Does NOT manage an mpv process. (Internal)
+    """
     def __init__(self, ipc_socket, callback=None):
+        """Create the wrapper.
+
+        *ipc_socket* is the path to the Unix/Linux socket or name of the Windows pipe.
+        *callback(event_name, data)* is the function for recieving events.
+        """
         Socket = UnixSocket
         if os.name == 'nt':
             Socket = WindowsSocket
@@ -210,9 +259,11 @@ class MPVInter:
         self.cid_wait = {}
     
     def stop(self):
+        """Terminate the underlying connection."""
         self.socket.stop()
 
     def event_callback(self, data):
+        """Internal callback for recieving events from MPV."""
         if "request_id" in data:
             self.cid_result[data["request_id"]] = data
             self.cid_wait[data["request_id"]].set()
@@ -220,6 +271,14 @@ class MPVInter:
             self.callback(data["event"], data)
     
     def command(self, command, *args):
+        """
+        Issue a command to MPV. Will block until completed or timeout is reached.
+        
+        *command* is the name of the MPV command
+
+        All further arguments are forwarded to the MPV command.
+        Throws TimeoutError if timeout of 120 seconds is reached.
+        """
         self.rid_lock.acquire()
         command_id = self.command_id
         self.command_id += 1
@@ -251,18 +310,29 @@ class MPVInter:
             raise TimeoutError("No response from MPV.")
 
 class EventHandler(threading.Thread):
+    """Event handling thread. (Internal)"""
     def __init__(self):
+        """Create an instance of the thread."""
         self.queue = queue.Queue()
         threading.Thread.__init__(self)
     
     def put_task(self, func, *args):
+        """
+        Put a new task to the thread.
+        
+        *func* is the function to call
+        
+        All further arguments are forwarded to *func*.
+        """
         self.queue.put((func, args))
 
     def stop(self):
+        """Terminate the thread."""
         self.queue.put("quit")
         self.join()
 
     def run(self):
+        """Process socket events. Do not run this directly. Use *start*."""
         while True:
             event = self.queue.get()
             if event == "quit":
@@ -273,7 +343,27 @@ class EventHandler(threading.Thread):
                 log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
 
 class MPV:
+    """
+    The main MPV interface class. Use this to control MPV.
+    
+    This will expose all mpv commands as callable methods and all properties.
+    You can set properties and call the commands directly.
+    
+    Please note that if you are using a really old MPV version, a fallback command
+    list is used. Not all commands may actually work when this fallback is used.
+    """
     def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, **kwargs):
+        """
+        Create the interface to MPV and process instance.
+
+        *start_mpv* will start an MPV process if true. (Default: True)
+        *ipc_socket* is the path to the Unix/Linux socket or name of Windows pipe. (Default: Random Temp File)
+        *mpv_location* is the location of MPV for *start_mpv*. (Default: Use MPV in PATH)
+        *log_handler(level, prefix, text)* is an optional handler for log events. (Default: Disabled)
+        *loglevel* is the level for log messages. Levels are fatal, error, warn, info, v, debug, trace. (Default: Disabled)
+
+        All other arguments are forwarded to MPV as command-line arguments if *start_mpv* is used.
+        """
         self.properties = {}
         self.event_bindings = {}
         self.key_bindings = {}
@@ -336,11 +426,24 @@ class MPV:
                 self.event_handler.put_task(self.key_bindings[args[1]])
 
     def bind_event(self, name, callback):
+        """
+        Bind a callback to an MPV event.
+
+        *name* is the MPV event name.
+        *callback(event_data)* is the function to call.
+        """
         if name not in self.event_bindings:
             self.event_bindings[name] = set()
         self.event_bindings[name].add(callback)
 
     def on_event(self, name):
+        """
+        Decorator to bind a callback to an MPV event.
+
+        @on_event(name)
+        def my_callback(event_data):
+            pass
+        """
         def wrapper(func):
             self.bind_event(name, func)
             return func
@@ -348,15 +451,29 @@ class MPV:
 
     # Added for compatibility.
     def event_callback(self, name):
+        """An alias for on_event to maintain compatibility with python-mpv."""
         return self.on_event(name)
 
     def on_key_press(self, name):
+        """
+        Decorator to bind a callback to an MPV keypress event.
+
+        @on_key_press(key_name)
+        def my_callback():
+            pass
+        """
         def wrapper(func):
             self.bind_key_press(name, func)
             return func
         return wrapper
 
     def bind_key_press(self, name, callback):
+        """
+        Bind a callback to an MPV keypress event.
+
+        *name* is the key symbol.
+        *callback()* is the function to call.
+        """
         self.keybind_lock.acquire()
         keybind_id = self.keybind_id
         self.keybind_id += 1
@@ -371,6 +488,14 @@ class MPV:
             self.enable_section(bind_name)
 
     def bind_property_observer(self, name, callback):
+        """
+        Bind a callback to an MPV property change.
+
+        *name* is the property name.
+        *callback(name, data)* is the function to call.
+
+        Returns a unique observer ID needed to destroy the observer.
+        """
         self.observer_lock.acquire()
         observer_id = self.observer_id
         self.observer_id += 1
@@ -381,16 +506,33 @@ class MPV:
         return observer_id
 
     def unbind_property_observer(self, observer_id):
+        """
+        Remove callback to an MPV property change.
+
+        *observer_id* is the id returned by bind_property_observer.
+        """
         self.command("unobserve_property", observer_id)
         del self.property_bindings[observer_id]
 
     def property_observer(self, name):
+        """
+        Decorator to bind a callback to an MPV property change.
+
+        @property_observer(property_name)
+        def my_callback(name, data):
+            pass
+        """
         def wrapper(func):
             self.bind_property_observer(name, func)
             return func
         return wrapper
     
     def wait_for_property(self, name):
+        """
+        Waits for the value of a property to change.
+
+        *name* is the name of the property.
+        """
         event = threading.Event()
         def handler(*_):
             event.set()
@@ -409,18 +551,29 @@ class MPV:
                 self.event_handler.put_task(callback, data)
 
     def play(self, url):
+        """Play the specified URL. An alias to loadfile()."""
         self.loadfile(url)
 
     def __del__(self):
         self.terminate()
 
     def terminate(self):
+        """Terminate the connection to MPV and process (if *start_mpv* is used)."""
         if self.mpv_process:
             self.mpv_process.stop()
         self.mpv_inter.stop()
         self.event_handler.stop()
 
     def command(self, command, *args):
+        """
+        Send a command to MPV. All commands are bound to the class by default,
+        except JSON IPC specific commands. This may also be useful to retain
+        compatibility with python-mpv, as it does not bind all of the commands. 
+
+        *command* is the command name.
+
+        All further arguments are forwarded to the MPV command. 
+        """
         return self.mpv_inter.command(command, *args)
 
     def __getattr__(self, name):

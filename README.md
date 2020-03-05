@@ -20,6 +20,8 @@ Create an instance of MPV. You can use an already running MPV or have the librar
 managed copy of MPV. Command arguments can be specified when initializing MPV if you are
 starting a managed copy of MPV.
 
+Please also see the [API Documentation](https://github.com/iwalton3/python-mpv-jsonipc/blob/master/docs.md).
+
 ```python
 from python_mpv_jsonrpc import MPV
 
