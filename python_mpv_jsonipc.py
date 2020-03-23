@@ -534,8 +534,13 @@ class MPV:
         *name* is the name of the property.
         """
         event = threading.Event()
+        first_event = True
         def handler(*_):
-            event.set()
+            nonlocal first_event
+            if first_event == True:
+                first_event = False
+            else:
+                event.set()
         observer_id = self.bind_property_observer(name, handler)
         event.wait()
         self.unbind_property_observer(observer_id)
