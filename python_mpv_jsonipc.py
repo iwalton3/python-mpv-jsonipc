@@ -417,7 +417,7 @@ class MPV:
         @self.on_event("property-change")
         def event_handler(data):
             if data.get("id") in self.property_bindings:
-                self.event_handler.put_task(self.property_bindings[data["id"]], data["name"], data["data"])
+                self.event_handler.put_task(self.property_bindings[data["id"]], data["name"], data.get("data"))
 
         @self.on_event("client-message")
         def client_message_handler(data):
