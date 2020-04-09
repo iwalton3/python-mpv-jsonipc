@@ -23,7 +23,7 @@ starting a managed copy of MPV.
 Please also see the [API Documentation](https://github.com/iwalton3/python-mpv-jsonipc/blob/master/docs.md).
 
 ```python
-from python_mpv_jsonrpc import MPV
+from python_mpv_jsonipc import MPV
 
 # Uses MPV that is in the PATH.
 mpv = MPV()
