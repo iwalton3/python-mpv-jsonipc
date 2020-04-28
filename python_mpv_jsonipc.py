@@ -566,7 +566,8 @@ class MPV:
         """Terminate the connection to MPV and process (if *start_mpv* is used)."""
         if self.mpv_process:
             self.mpv_process.stop()
-        self.mpv_inter.stop()
+        if hasattr(self, 'mpv_inter'):
+            self.mpv_inter.stop()
         self.event_handler.stop()
 
     def command(self, command, *args):
