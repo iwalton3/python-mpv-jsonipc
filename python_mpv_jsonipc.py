@@ -369,6 +369,7 @@ class MPV:
         self.key_bindings = {}
         self.property_bindings = {}
         self.mpv_process = None
+        self.mpv_inter = None
         self.event_handler = EventHandler()
         self.event_handler.start()
         if ipc_socket is None:
@@ -566,7 +567,7 @@ class MPV:
         """Terminate the connection to MPV and process (if *start_mpv* is used)."""
         if self.mpv_process:
             self.mpv_process.stop()
-        if hasattr(self, 'mpv_inter'):
+        if self.mpv_inter:
             self.mpv_inter.stop()
         self.event_handler.stop()
 
