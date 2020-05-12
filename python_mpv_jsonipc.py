@@ -47,6 +47,7 @@ class WindowsSocket(threading.Thread):
 
         *ipc_socket* is the pipe name. (Not including \\\\.\\pipe\\)
         *callback(json_data)* is the function for recieving events.
+        *quit_callback* is called when the socket connection dies.
         """
         ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
@@ -118,6 +119,7 @@ class UnixSocket(threading.Thread):
 
         *ipc_socket* is the path to the socket.
         *callback(json_data)* is the function for recieving events.
+        *quit_callback* is called when the socket connection dies.
         """
         self.ipc_socket = ipc_socket
         self.callback = callback
@@ -246,6 +248,7 @@ class MPVInter:
 
         *ipc_socket* is the path to the Unix/Linux socket or name of the Windows pipe.
         *callback(event_name, data)* is the function for recieving events.
+        *quit_callback* is called when the socket connection to MPV dies.
         """
         Socket = UnixSocket
         if os.name == 'nt':
@@ -368,6 +371,7 @@ class MPV:
         *mpv_location* is the location of MPV for *start_mpv*. (Default: Use MPV in PATH)
         *log_handler(level, prefix, text)* is an optional handler for log events. (Default: Disabled)
         *loglevel* is the level for log messages. Levels are fatal, error, warn, info, v, debug, trace. (Default: Disabled)
+        *quit_callback* is called when the socket connection to MPV dies.
 
         All other arguments are forwarded to MPV as command-line arguments if *start_mpv* is used.
         """
