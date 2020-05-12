@@ -152,6 +152,8 @@ class UnixSocket(threading.Thread):
 
     def send(self, data):
         """Send *data* to the socket, encoded as JSON."""
+        if self.socket is None:
+            raise BrokenPipeError("socket is closed")
         self.socket.send(json.dumps(data).encode('utf-8') + b'\n')
 
     def run(self):
