@@ -42,7 +42,7 @@ class WindowsSocket(threading.Thread):
     Data is automatically encoded and decoded as JSON. The callback
     function will be called for each inbound message.
     """
-    def __init__(self, ipc_socket, callback=None):
+    def __init__(self, ipc_socket, callback=None, quit_callback=None):
         """Create the wrapper.
 
         *ipc_socket* is the pipe name. (Not including \\\\.\\pipe\\)
@@ -50,6 +50,7 @@ class WindowsSocket(threading.Thread):
         """
         ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
+        self.quit_callback = quit_callback
         
         access = _winapi.GENERIC_READ | _winapi.GENERIC_WRITE
         limit = 5 # Connection may fail at first. Try 5 times.
@@ -102,7 +103,8 @@ class WindowsSocket(threading.Thread):
                     self.callback(json_data)
                 data = b''
         except EOFError:
-            pass
+            if self.quit_callback:
+                self.quit_callback()
 
 class UnixSocket(threading.Thread):
     """
@@ -111,7 +113,7 @@ class UnixSocket(threading.Thread):
     Data is automatically encoded and decoded as JSON. The callback
     function will be called for each inbound message.
     """
-    def __init__(self, ipc_socket, callback=None):
+    def __init__(self, ipc_socket, callback=None, quit_callback=None):
         """Create the wrapper.
 
         *ipc_socket* is the path to the socket.
@@ -119,6 +121,7 @@ class UnixSocket(threading.Thread):
         """
         self.ipc_socket = ipc_socket
         self.callback = callback
+        self.quit_callback = quit_callback
         self.socket = socket.socket(socket.AF_UNIX)
         self.socket.connect(self.ipc_socket)
 
@@ -157,6 +160,8 @@ class UnixSocket(threading.Thread):
                 json_data = json.loads(item)
                 self.callback(json_data)
             data = b''
+        if self.quit_callback:
+            self.quit_callback()
 
 class MPVProcess:
     """
@@ -236,7 +241,7 @@ class MPVInter:
     """
     Low-level interface to MPV. Does NOT manage an mpv process. (Internal)
     """
-    def __init__(self, ipc_socket, callback=None):
+    def __init__(self, ipc_socket, callback=None, quit_callback=None):
         """Create the wrapper.
 
         *ipc_socket* is the path to the Unix/Linux socket or name of the Windows pipe.
@@ -247,10 +252,11 @@ class MPVInter:
             Socket = WindowsSocket
 
         self.callback = callback
+        self.quit_callback = quit_callback
         if self.callback is None:
             self.callback = lambda event, data: None
         
-        self.socket = Socket(ipc_socket, self.event_callback)
+        self.socket = Socket(ipc_socket, self.event_callback, self.quit_callback)
         self.socket.start()
         self.command_id = 1
         self.rid_lock = threading.Lock()
@@ -352,7 +358,8 @@ class MPV:
     Please note that if you are using a really old MPV version, a fallback command
     list is used. Not all commands may actually work when this fallback is used.
     """
-    def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, **kwargs):
+    def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None,
+                 log_handler=None, loglevel=None, quit_callback=None, **kwargs):
         """
         Create the interface to MPV and process instance.
 
@@ -391,7 +398,7 @@ class MPV:
             else:
                 raise MPVError("MPV process retry limit reached.")
 
-        self.mpv_inter = MPVInter(ipc_socket, self._callback)
+        self.mpv_inter = MPVInter(ipc_socket, self._callback, quit_callback)
         self.properties = set(x.replace("-", "_") for x in self.command("get_property", "property-list"))
         try:
             command_list = [x["name"] for x in self.command("get_property", "command-list")]
