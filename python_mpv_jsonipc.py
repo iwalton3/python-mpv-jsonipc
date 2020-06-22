@@ -112,6 +112,10 @@ class WindowsSocket(threading.Thread):
         except EOFError:
             if self.quit_callback:
                 self.quit_callback()
+        except Exception as ex:
+            log.error("Pipe connection died.", exc_info=1)
+            if self.quit_callback:
+                self.quit_callback()
 
 class UnixSocket(threading.Thread):
     """
@@ -160,21 +164,24 @@ class UnixSocket(threading.Thread):
         """Process socket events. Do not run this directly. Use *start*."""
         data = b''
         while True:
-            current_data = self.socket.recv(1024)
-            if current_data == b'':
-                break
+            try:
+                current_data = self.socket.recv(1024)
+                if current_data == b'':
+                    break
 
-            data += current_data
-            if data[-1] != 10:
-                continue
-
-            data = data.decode('utf-8', 'ignore').encode('utf-8')
-            for item in data.split(b'\n'):
-                if item == b'':
+                data += current_data
+                if data[-1] != 10:
                     continue
-                json_data = json.loads(item)
-                self.callback(json_data)
-            data = b''
+
+                data = data.decode('utf-8', 'ignore').encode('utf-8')
+                for item in data.split(b'\n'):
+                    if item == b'':
+                        continue
+                    json_data = json.loads(item)
+                    self.callback(json_data)
+                data = b''
+            except Exception as ex:
+                log.error("Socket connection died.", exc_info=1)
         if self.quit_callback:
             self.quit_callback()
 
