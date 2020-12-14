@@ -163,8 +163,8 @@ class UnixSocket(threading.Thread):
     def run(self):
         """Process socket events. Do not run this directly. Use *start*."""
         data = b''
-        while True:
-            try:
+        try:
+            while True:
                 current_data = self.socket.recv(1024)
                 if current_data == b'':
                     break
@@ -180,8 +180,8 @@ class UnixSocket(threading.Thread):
                     json_data = json.loads(item)
                     self.callback(json_data)
                 data = b''
-            except Exception as ex:
-                log.error("Socket connection died.", exc_info=1)
+        except Exception as ex:
+            log.error("Socket connection died.", exc_info=1)
         if self.quit_callback:
             self.quit_callback()
 
