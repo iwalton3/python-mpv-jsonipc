@@ -76,7 +76,10 @@ class WindowsSocket(threading.Thread):
     def stop(self, join=True):
         """Terminate the thread."""
         if self.socket is not None:
-            self.socket.close()
+            try:
+                self.socket.close()
+            except OSError:
+                pass # Ignore socket close failure.
         if join:
             self.join()
 
