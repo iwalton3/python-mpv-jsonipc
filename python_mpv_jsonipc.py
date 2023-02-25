@@ -434,7 +434,10 @@ class MPV:
             log.warning("Using fallback command list.")
             command_list = FALLBACK_COMMAND_LIST
         for command in command_list:
-            object.__setattr__(self, command.replace("-", "_"), self._get_wrapper(command))
+            command_name = command.replace("-", "_")
+            if command_name in self.properties:
+                command_name = f"{command_name}_cmd"
+            object.__setattr__(self, command_name, self._get_wrapper(command))
 
         self._dir = list(self.properties)
         self._dir.extend(object.__dir__(self))
