@@ -222,8 +222,17 @@ class MPVProcess:
         self._set_default(kwargs, "input_ipc_server", ipc_socket_name)
         self._set_default(kwargs, "input_terminal", False)
         self._set_default(kwargs, "terminal", False)
+
+        arg_pairs = []
+        for key, value in kwargs.items():
+            if type(value) == list:
+                for v in value:
+                    arg_pairs.append((key, v))
+            else:
+                arg_pairs.append((key, value))
+
         args.extend("--{0}={1}".format(v[0].replace("_", "-"), self._mpv_fmt(v[1]))
-                    for v in kwargs.items())
+                    for v in arg_pairs)
         self.process = subprocess.Popen(args)
         ipc_exists = False
         for _ in range(100): # Give MPV 10 seconds to start.
