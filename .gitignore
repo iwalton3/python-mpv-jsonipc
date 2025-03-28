@@ -2,3 +2,4 @@ __pycache__
 dist
 build
 python_mpv_jsonipc.egg-info
+.vscode
