@@ -7,8 +7,8 @@ with open("README.md", "r") as fh:
 setup(
     name="python-mpv-jsonipc",
     version="1.2.1",
-    author="Ian Walton",
-    author_email="iwalton3@gmail.com",
+    author="Izzie Walton",
+    author_email="izzie@iwalton.com",
     description="Python API to MPV using JSON IPC",
     license="Apache-2.0",
     long_description=open("README.md").read(),
