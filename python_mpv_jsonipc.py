@@ -52,6 +52,7 @@ class WindowsSocket(threading.Thread):
         ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
         self.quit_callback = quit_callback
+        self._stopping = False
 
         access = _winapi.GENERIC_READ | _winapi.GENERIC_WRITE
         limit = 5 # Connection may fail at first. Try 5 times.
@@ -75,6 +76,7 @@ class WindowsSocket(threading.Thread):
 
     def stop(self, join=True):
         """Terminate the thread."""
+        self._stopping = True
         if self.socket is not None:
             try:
                 self.socket.close()
@@ -116,7 +118,9 @@ class WindowsSocket(threading.Thread):
             if self.quit_callback:
                 self.quit_callback()
         except Exception as ex:
-            log.error("Pipe connection died.", exc_info=1)
+            # Only log if not intentionally stopping
+            if not self._stopping:
+                log.error("Pipe connection died.", exc_info=1)
             if self.quit_callback:
                 self.quit_callback()
 
@@ -137,6 +141,7 @@ class UnixSocket(threading.Thread):
         self.ipc_socket = ipc_socket
         self.callback = callback
         self.quit_callback = quit_callback
+        self._stopping = False
         self.socket = socket.socket(socket.AF_UNIX)
         self.socket.connect(self.ipc_socket)
 
@@ -147,6 +152,7 @@ class UnixSocket(threading.Thread):
 
     def stop(self, join=True):
         """Terminate the thread."""
+        self._stopping = True
         if self.socket is not None:
             try:
                 self.socket.shutdown(socket.SHUT_WR)
@@ -184,7 +190,9 @@ class UnixSocket(threading.Thread):
                     self.callback(json_data)
                 data = b''
         except Exception as ex:
-            log.error("Socket connection died.", exc_info=1)
+            # Only log if not intentionally stopping
+            if not self._stopping:
+                log.error("Socket connection died.", exc_info=1)
         if self.quit_callback:
             self.quit_callback()
 
