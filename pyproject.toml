@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-mpv-jsonipc"
+version = "1.2.2"
+description = "Python API to MPV using JSON IPC"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE.md"]
+authors = [
+    { name = "Izzie Walton", email = "izzie@iwalton.com" },
+]
+requires-python = ">=3.6"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/iwalton3/python-mpv-jsonipc"
+
+[tool.setuptools]
+py-modules = ["python_mpv_jsonipc"]
