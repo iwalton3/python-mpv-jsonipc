@@ -73,6 +73,7 @@ class WindowsSocket(threading.Thread):
             self.callback = lambda data: None
 
         threading.Thread.__init__(self)
+        self.daemon = True
 
     def stop(self, join=True):
         """Terminate the thread."""
@@ -149,6 +150,7 @@ class UnixSocket(threading.Thread):
             self.callback = lambda data: None
 
         threading.Thread.__init__(self)
+        self.daemon = True
 
     def stop(self, join=True):
         """Terminate the thread."""
@@ -364,6 +366,7 @@ class EventHandler(threading.Thread):
         """Create an instance of the thread."""
         self.queue = queue.Queue()
         threading.Thread.__init__(self)
+        self.daemon = True
 
     def put_task(self, func, *args):
         """
