@@ -198,6 +198,26 @@ class UnixSocket(threading.Thread):
         if self.quit_callback:
             self.quit_callback()
 
+def _ipc_endpoint_ready(ipc_socket):
+    """Return True once MPV's IPC endpoint is available.
+
+    On POSIX the endpoint is a filesystem socket, so ``os.path.exists`` works. On
+    Windows it is a *named pipe*, for which ``os.path.exists`` is always False — so we
+    probe it with ``WaitNamedPipe`` instead. Using ``os.path.exists`` on Windows made
+    the startup poll never detect the pipe, raising a spurious "MPV start timed out".
+    """
+    if os.name != 'nt':
+        return os.path.exists(ipc_socket)
+    try:
+        _winapi.WaitNamedPipe(ipc_socket, 0)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Pipe exists but all instances are momentarily busy — it is present.
+        return True
+
+
 class MPVProcess:
     """
     Manages an MPV process, ensuring the socket or pipe is available. (Internal)
@@ -248,7 +268,7 @@ class MPVProcess:
         for _ in range(100): # Give MPV 10 seconds to start.
             time.sleep(0.1)
             self.process.poll()
-            if os.path.exists(ipc_socket):
+            if _ipc_endpoint_ready(ipc_socket):
                 ipc_exists = True
                 log.debug("Found MPV socket.")
                 break
