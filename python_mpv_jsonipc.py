@@ -268,9 +268,13 @@ class MPVProcess:
             prop_dict[key] = value
 
     def _mpv_fmt(self, data):
-        if data == True:
+        # Use identity comparison so numeric arguments are preserved. In Python
+        # ``1 == True`` and ``0 == False``, so ``==`` would convert numeric
+        # options such as ``video-scale-x=1`` into ``--video-scale-x=yes``,
+        # which MPV rejects.
+        if data is True:
             return "yes"
-        elif data == False:
+        elif data is False:
             return "no"
         else:
             return data
