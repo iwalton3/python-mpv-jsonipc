@@ -45,11 +45,18 @@ def describe():
         if inspect.isclass(value):
             if value.__module__ != module.__name__:
                 continue  # imported, not ours
+            # Only what the class itself defines. `dir()` would drag in
+            # inherited stdlib members -- `Thread.start`, and for exceptions
+            # `with_traceback` and `add_note` -- whose introspectability
+            # varies by interpreter version: 3.13 reports
+            # `(self, object, /)` where 3.11 raises and we record `(?)`.
+            # That made the golden file disagree with itself across the
+            # Python matrix while nothing about this library had changed.
+            # Inheritance is still recorded, in `bases`.
             methods = {}
-            for attr in sorted(dir(value)):
+            for attr, member in sorted(vars(value).items()):
                 if attr.startswith("_") and attr != "__init__":
                     continue
-                member = inspect.getattr_static(value, attr, None)
                 if callable(member):
                     methods[attr] = _signature(member)
             surface["classes"][name] = {

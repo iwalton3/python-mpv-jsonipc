@@ -32,9 +32,51 @@ def declared_floor():
     return int(match.group(1)), int(match.group(2))
 
 
+#: Syntax that does not exist before the stated version, for probing whether
+#: this interpreter enforces `feature_version` at all.
+PROBES = (
+    ((3, 8), "if (n := 1): pass"),
+    ((3, 10), "match 1:\n    case 1: pass\n"),
+)
+
+
+def enforcement_probe(floor):
+    """A snippet newer than *floor*, or None if we have nothing newer."""
+    for version, source in PROBES:
+        if version > floor:
+            return source
+    return None
+
+
+def enforces_feature_version(floor):
+    """Whether `ast.parse` on THIS interpreter rejects newer syntax.
+
+    Not a version comparison: CPython's enforcement has been tightened over
+    time, and 3.9 accepts a walrus at `feature_version=(3, 6)` where 3.13
+    rejects it. Asking the interpreter is the only reliable form of the
+    question -- discovered when this file's own meta-test failed on the 3.9
+    CI leg and nowhere else.
+    """
+    source = enforcement_probe(floor)
+    if source is None:
+        return False
+    try:
+        ast.parse(source, feature_version=floor)
+    except SyntaxError:
+        return True
+    return False
+
+
 class PythonFloorTest(unittest.TestCase):
     def test_the_module_parses_as_the_oldest_supported_python(self):
         floor = declared_floor()
+        if not enforces_feature_version(floor):
+            # Honest skip rather than a pass that proves nothing. The guard
+            # only has teeth on interpreters that enforce feature_version,
+            # and the CI matrix includes several that do.
+            self.skipTest(
+                "this interpreter does not enforce feature_version={0}; "
+                "the check is meaningless here".format(floor))
         with open(MODULE) as handle:
             source = handle.read()
         try:
@@ -47,15 +89,15 @@ class PythonFloorTest(unittest.TestCase):
                 "pip installing for everyone below it.".format(
                     floor[0], floor[1], error.msg, error.lineno))
 
-    def test_the_floor_check_can_actually_fail(self):
+    def test_at_least_the_mechanism_is_exercised_somewhere(self):
         # The check above passes trivially if `feature_version` is ignored,
-        # which is the shape of a test that cannot fail. Prove the mechanism
-        # rejects something the floor genuinely lacks (walrus is 3.8).
+        # which is the shape of a test that cannot fail. This asserts the
+        # rejection really happens wherever it is claimed to.
         floor = declared_floor()
-        if floor >= (3, 8):
-            self.skipTest("floor is 3.8+, walrus is valid there")
+        if not enforces_feature_version(floor):
+            self.skipTest("no enforcement on this interpreter")
         with self.assertRaises(SyntaxError):
-            ast.parse("if (n := 1): pass", feature_version=floor)
+            ast.parse(enforcement_probe(floor), feature_version=floor)
 
 
 if __name__ == "__main__":

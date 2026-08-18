@@ -6,15 +6,8 @@
       ],
       "methods": {
         "__init__": "(self)",
-        "getName": "(self)",
-        "isDaemon": "(self)",
-        "is_alive": "(self)",
-        "join": "(self, timeout=None)",
         "put_task": "(self, func, *args)",
         "run": "(self)",
-        "setDaemon": "(self, daemonic)",
-        "setName": "(self, name)",
-        "start": "(self)",
         "stop": "(self, join=True)"
       }
     },
@@ -43,9 +36,7 @@
         "Exception"
       ],
       "methods": {
-        "__init__": "(self, *args, **kwargs)",
-        "add_note": "(self, object, /)",
-        "with_traceback": "(self, object, /)"
+        "__init__": "(self, *args, **kwargs)"
       }
     },
     "MPVInter": {
@@ -74,15 +65,8 @@
       ],
       "methods": {
         "__init__": "(self, ipc_socket, callback=None, quit_callback=None)",
-        "getName": "(self)",
-        "isDaemon": "(self)",
-        "is_alive": "(self)",
-        "join": "(self, timeout=None)",
         "run": "(self)",
         "send": "(self, data)",
-        "setDaemon": "(self, daemonic)",
-        "setName": "(self, name)",
-        "start": "(self)",
         "stop": "(self, join=True)"
       }
     },
@@ -92,15 +76,8 @@
       ],
       "methods": {
         "__init__": "(self, ipc_socket, callback=None, quit_callback=None)",
-        "getName": "(self)",
-        "isDaemon": "(self)",
-        "is_alive": "(self)",
-        "join": "(self, timeout=None)",
         "run": "(self)",
         "send": "(self, data)",
-        "setDaemon": "(self, daemonic)",
-        "setName": "(self, name)",
-        "start": "(self)",
         "stop": "(self, join=True)"
       }
     }

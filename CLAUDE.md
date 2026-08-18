@@ -101,7 +101,22 @@ compare the same file.
 `test_python_floor.py` parses the module with `ast.parse(feature_version=...)`
 against the `requires-python` floor in `pyproject.toml`. Raising that floor is
 itself a downstream break (pip stops installing below it), so the floor is
-fixed and the syntax is what gets checked.
+fixed and the syntax is what gets checked. **It asks the interpreter whether
+`feature_version` is enforced rather than assuming**: 3.9 happily accepts a
+walrus at `feature_version=(3, 6)` where 3.13 rejects it, so on older legs the
+check skips loudly instead of passing while proving nothing. The matrix
+includes interpreters that do enforce, which is what gives the guard teeth.
+
+Two version-portability traps, both found by the CI matrix rather than by
+reading anything, and both in the *tests*:
+
+* **The golden surface records only what each class defines** (`vars(cls)`,
+  not `dir(cls)`). `dir()` drags in inherited stdlib members, and their
+  introspectability moves between versions — `BaseException.with_traceback`
+  reports `(self, object, /)` on 3.13 and raises on 3.11, so the golden
+  disagreed with itself across the matrix while nothing in this library had
+  changed. Inheritance is still recorded, in `bases`.
+* **The enforcement probe above**, for the same class of reason.
 
 ### Verify a new test can fail
 
