@@ -26,7 +26,14 @@ from _harness import (LIVE_OPTIONS, MPV_BINARY, python_mpv_jsonipc,
 class BadOptionTest(unittest.TestCase):
     """mpv exits immediately when handed an option it does not have. This is
     the exact case the shim hits with a build-gated option such as
-    `--input-gamepad` on an mpv built without SDL2 gamepad support."""
+    `--input-gamepad` on an mpv built without SDL2 gamepad support.
+
+    **These assertions were rewritten deliberately** when start-failure
+    diagnosis landed. What they said before is preserved in
+    `PreDiagnosisBehaviourTest` below, reachable with
+    `diagnose_start_failures=False`, because that is the behaviour downstream
+    projects have been living with.
+    """
 
     def start_with_bad_option(self, **overrides):
         options = dict(LIVE_OPTIONS)
@@ -37,18 +44,100 @@ class BadOptionTest(unittest.TestCase):
         options["definitely_not_an_mpv_option"] = "yes"
         return python_mpv_jsonipc.MPV(**options)
 
-    def test_it_raises_mpv_error_with_the_retry_limit_message(self):
+    def test_the_error_names_the_option_mpv_refused(self):
+        with self.assertRaises(python_mpv_jsonipc.MPVProcessError) as caught:
+            self.start_with_bad_option()
+        self.assertEqual(caught.exception.bad_option,
+                         "definitely-not-an-mpv-option")
+        self.assertIn("definitely-not-an-mpv-option", str(caught.exception))
+
+    def test_it_is_still_an_mpv_error(self):
+        # The compatibility promise. Downstream catches MPVError and nothing
+        # finer; a new type that escaped those handlers would be a break
+        # dressed up as an improvement.
+        with self.assertRaises(python_mpv_jsonipc.MPVError):
+            self.start_with_bad_option()
+
+    def test_it_carries_mpvs_exit_status_and_its_own_words(self):
+        with self.assertRaises(python_mpv_jsonipc.MPVProcessError) as caught:
+            self.start_with_bad_option()
+        self.assertEqual(caught.exception.returncode, 1)
+        self.assertIn("Error parsing option", caught.exception.log_output)
+        self.assertFalse(caught.exception.retryable)
+
+    def test_it_stops_instead_of_spending_every_retry(self):
+        # Exactly one real start attempt plus one diagnostic probe, and no
+        # second attempt. Counted by shape rather than by total, because the
+        # probe goes through Popen too (subprocess.run uses it), so a bare
+        # count of 2 would also be satisfied by two starts and no probe.
+        with mock.patch.object(python_mpv_jsonipc.subprocess, "Popen",
+                               wraps=subprocess.Popen) as popen:
+            with self.assertRaises(python_mpv_jsonipc.MPVProcessError):
+                self.start_with_bad_option(start_retries=3)
+        argvs = [call.args[0] for call in popen.call_args_list]
+        starts = [a for a in argvs if "--version" not in a]
+        probes = [a for a in argvs if "--version" in a]
+        self.assertEqual(len(starts), 1, "MPV was started more than once")
+        self.assertEqual(len(probes), 1, "the diagnosis ran more than once")
+
+    def test_it_does_not_pay_the_retry_delay_it_cannot_use(self):
+        started = time.perf_counter()
+        with self.assertRaises(python_mpv_jsonipc.MPVProcessError):
+            self.start_with_bad_option(start_retries=3,
+                                       start_retry_delay_ms=3000)
+        self.assertLess(time.perf_counter() - started, 3.0)
+
+    def test_the_diagnosis_does_not_bind_the_ipc_socket(self):
+        # The probe re-runs MPV with the same --input-ipc-server. `--version`
+        # makes it exit before serving, but if that ever stopped being true
+        # the diagnosis would squat on the endpoint the real MPV is about to
+        # open -- turning a diagnosable failure into a mysterious one.
+        socket_path = "/tmp/diagnosis-probe-{0}".format(os.getpid())
+        if os.name == "nt":
+            self.skipTest("POSIX socket paths only")
+        with self.assertRaises(python_mpv_jsonipc.MPVProcessError):
+            self.start_with_bad_option(ipc_socket=socket_path)
+        self.assertFalse(os.path.exists(socket_path))
+
+    def test_a_failure_it_cannot_explain_still_retries_and_reports_as_before(self):
+        # The diagnosis is not always conclusive -- mpv may have died for a
+        # reason it did not write down. That path must behave exactly as it
+        # always did, or an unexplained flake becomes a hard failure.
+        with mock.patch.object(python_mpv_jsonipc, "_diagnose_start_failure",
+                               return_value=(None, "nothing conclusive")):
+            with mock.patch.object(python_mpv_jsonipc.subprocess, "Popen",
+                                   wraps=subprocess.Popen) as popen:
+                with self.assertRaises(python_mpv_jsonipc.MPVError) as caught:
+                    self.start_with_bad_option(start_retries=3)
+                self.assertEqual(str(caught.exception),
+                                 "MPV process retry limit reached.")
+                self.assertEqual(popen.call_count, 3)
+
+
+@requires_mpv
+class PreDiagnosisBehaviourTest(unittest.TestCase):
+    """`diagnose_start_failures=False` -- what every release before 1.3 did.
+
+    Kept as a supported escape hatch, and tested, because "you can turn the
+    new behaviour off" is worth nothing if nobody checks that the switch
+    still reaches the old code.
+    """
+
+    def start_with_bad_option(self, **overrides):
+        options = dict(LIVE_OPTIONS)
+        options.update(dict(mpv_location=MPV_BINARY,
+                            start_retries=3,
+                            start_retry_delay_ms=50,
+                            diagnose_start_failures=False))
+        options.update(overrides)
+        options["definitely_not_an_mpv_option"] = "yes"
+        return python_mpv_jsonipc.MPV(**options)
+
+    def test_it_raises_the_retry_limit_message_and_names_no_option(self):
         with self.assertRaises(python_mpv_jsonipc.MPVError) as caught:
             self.start_with_bad_option()
         self.assertEqual(str(caught.exception),
                          "MPV process retry limit reached.")
-
-    def test_the_error_says_nothing_about_which_option_was_wrong(self):
-        # The whole reason the replacement is wanted. mpv printed
-        # "Error parsing option definitely-not-an-mpv-option (option not
-        # found)" to a stderr nobody captured, and this is what survives.
-        with self.assertRaises(python_mpv_jsonipc.MPVError) as caught:
-            self.start_with_bad_option()
         self.assertNotIn("definitely", str(caught.exception))
 
     def test_every_retry_is_spent_on_a_start_that_cannot_succeed(self):
@@ -59,14 +148,11 @@ class BadOptionTest(unittest.TestCase):
             self.assertEqual(popen.call_count, 3)
 
     def test_the_configured_delay_is_paid_after_every_failure(self):
-        # Three failures, three sleeps -- including one after the final
-        # attempt, whose only effect is to delay the exception.
         started = time.perf_counter()
         with self.assertRaises(python_mpv_jsonipc.MPVError):
             self.start_with_bad_option(start_retries=3,
                                        start_retry_delay_ms=300)
-        elapsed = time.perf_counter() - started
-        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertGreaterEqual(time.perf_counter() - started, 0.9)
 
 
 @requires_mpv
