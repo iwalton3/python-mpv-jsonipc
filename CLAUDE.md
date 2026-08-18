@@ -32,6 +32,18 @@ A separate `EventHandler` thread serializes user callbacks (events, property obs
 - **`start_retries` / `start_retry_delay_ms`** on `MPV.__init__` retry the *whole* `MPVProcess` construction (including the 10-second socket-appearance poll inside `MPVProcess`).
 - **`wait_for_property`** ignores the first observer event because MPV emits an immediate "current value" notification on `observe_property`; only the *next* change releases the wait.
 - **`__del__` calls `terminate()`** — be careful adding state that isn't safe to touch during interpreter shutdown.
+- **`WindowsSocket`'s five-attempt `CreateFile` retry is not redundant with
+  `_ipc_endpoint_ready`**, even though it looks it now. The readiness poll
+  added in #23 runs inside `MPVProcess`, so on the ordinary start path the
+  pipe is known to exist before the transport is built — but two paths still
+  depend on the retry alone. (1) **`start_mpv=False`** builds no `MPVProcess`
+  at all, so nothing polls; the retry is the whole readiness wait when
+  attaching to an mpv somebody else started (jellyfin-mpv-shim's
+  `mpv_ext_start: false`). (2) `_ipc_endpoint_ready` deliberately answers
+  *True* for a pipe that exists but whose instances are all busy — see its
+  own comment — and `CreateFile` against a busy pipe fails with
+  `ERROR_PIPE_BUSY`, an `OSError`. The retry is what turns that race into a
+  connection a moment later rather than a hard failure. Keep it.
 - **The Windows transport is built on two CPython internals with no compatibility contract**, and this is deliberate. `_winapi` is a private C extension; `PipeConnection` is not in `multiprocessing.connection.__all__` (which is `['Client', 'Listener', 'Pipe', 'wait']`), is defined conditionally inside `if _winapi:`, and is an implementation detail of `Pipe()` — we construct it from a handle we opened ourselves with `FILE_FLAG_OVERLAPPED`. It was chosen over `pywin32` because every native dependency costs downstream projects a PyInstaller fight (hooks, `pythoncom`/`pywintypes` DLLs, post-install registration), and it has held for six years. **Do not "tidy" these imports away** — a plain `open(r'\\.\pipe\...')` cannot do overlapped I/O, and `stop()` relies on closing the handle to break a blocked read. If they ever have to go, the replacement is `ctypes` against `kernel32` (stdlib, no hooks, PyInstaller-clean — the same property that motivated the original choice), or vendoring the ~80 lines of `_close`/`_send_bytes`/`_recv_bytes`/`_get_more_data` from CPython's `connection.py` under the PSF licence. Note this breaks on a *Python* upgrade rather than a code change, which is why the Windows CI leg needs a version matrix on a schedule, including prereleases.
 
 ## Testing

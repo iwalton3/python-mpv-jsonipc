@@ -8,7 +8,10 @@ testing the list, not the library.
 
 import unittest
 
-from _harness import LiveMPVTest, python_mpv_jsonipc
+import os
+
+from _harness import (LiveMPVTest, MPV_BINARY,
+                      python_mpv_jsonipc)
 
 
 class ConstructionTest(LiveMPVTest):
@@ -90,6 +93,70 @@ class CommandTest(LiveMPVTest):
         self.mpv.loadfile = lambda *args: seen.append(args)
         self.mpv.play("av://lavfi:testsrc")
         self.assertEqual(seen, [("av://lavfi:testsrc",)])
+
+
+class AttachToExistingMPVTest(unittest.TestCase):
+    """`start_mpv=False` -- attaching to an mpv somebody else started.
+
+    jellyfin-mpv-shim's `mpv_ext_start: false` runs this way, and it is the
+    path with the least coverage elsewhere: no `MPVProcess` is built, so
+    `_ipc_endpoint_ready` never runs and the transport's own connect retry is
+    the only thing that waits for the endpoint.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if MPV_BINARY is None:
+            raise unittest.SkipTest("no mpv binary found")
+
+    def setUp(self):
+        import random
+        import subprocess
+        import time
+
+        name = "mpvtest{0}".format(random.randint(0, 2 ** 48))
+        # Windows wants a bare pipe name (the library prepends the
+        # \\.\pipe\ prefix); POSIX wants a filesystem path.
+        self.ipc_socket = name if os.name == "nt" else "/tmp/" + name
+
+        self.process = subprocess.Popen([
+            MPV_BINARY, "--idle=yes", "--config=no", "--vo=null", "--ao=null",
+            "--terminal=no", "--input-ipc-server=" + self.ipc_socket])
+        self.addCleanup(self._stop_mpv)
+
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if python_mpv_jsonipc._ipc_endpoint_ready(
+                    self.ipc_socket if os.name != "nt"
+                    else "\\\\.\\pipe\\" + self.ipc_socket):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("mpv never opened its IPC endpoint")
+
+    def _stop_mpv(self):
+        self.process.terminate()
+        self.process.wait(timeout=10)
+        if os.name != "nt" and os.path.exists(self.ipc_socket):
+            os.remove(self.ipc_socket)
+
+    def test_it_attaches_and_talks_to_the_running_mpv(self):
+        mpv = python_mpv_jsonipc.MPV(start_mpv=False,
+                                     ipc_socket=self.ipc_socket)
+        self.addCleanup(mpv.terminate)
+        self.assertIsInstance(mpv.command("get_property", "mpv-version"), str)
+        mpv.pause = True
+        self.assertIs(mpv.pause, True)
+
+    def test_terminate_leaves_the_process_it_did_not_start_alone(self):
+        # It never owned the process, so it must not kill it. A host that
+        # attaches to the user's own mpv would otherwise shut it down.
+        mpv = python_mpv_jsonipc.MPV(start_mpv=False,
+                                     ipc_socket=self.ipc_socket)
+        self.assertIsNone(mpv.mpv_process)
+        mpv.terminate()
+        self.assertIsNone(self.process.poll(),
+                          "terminate() killed an mpv it did not start")
 
 
 class TeardownTest(LiveMPVTest):
