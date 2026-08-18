@@ -183,15 +183,22 @@ job failed the first time it ran.
 
 Three things in there are load-bearing and easy to undo by accident:
 
-* **`DEBIAN_FRONTEND: noninteractive` on the Linux mpv install, and
-  `timeout-minutes` on every job.** Two Linux legs once sat wedged in
-  `apt-get install mpv` for 22+ minutes — not in the tests, which take 12
-  seconds on the same runner and had not started. Without a frontend setting a
-  post-install prompt waits for an answer nobody can give, so the job *hangs*
-  rather than fails, and an unbounded GitHub job holds a runner for six hours.
-  The test step has its own shorter timeout so a genuine test hang fails with
-  the `-v` output naming the last test that started, instead of timing out the
-  whole job with nothing to read.
+* **The Linux `Install mpv` step is defended and bounded, because it hangs.**
+  It has wedged more than once — not in the tests, which take 12 seconds on
+  the same runner and had not started. `DEBIAN_FRONTEND: noninteractive` was
+  the first fix and **did not work**: it recurred at 14m57s, which rules out
+  an interactive prompt and leaves apt lock contention (the runner's own
+  unattended upgrades) and stalled mirrors. Both are now defended against —
+  background apt services stopped, `DPkg::Lock::Timeout`, `Acquire::Retries`,
+  a per-attempt `timeout` and one retry — without needing to know which it
+  was. Treat one green run as no evidence here; the failure is intermittent.
+* **Every job is bounded, and each job timeout is LARGER than its steps'.**
+  An unbounded GitHub job holds a runner for six hours. But a job timeout
+  smaller than the sum of its step timeouts is worse than useless: the job is
+  reported *cancelled* with no indication of which step stalled, which reads
+  like a human pressed cancel. Steps fail by name; the job timeout is only
+  the backstop. The test step's own timeout exists so a genuine test hang
+  fails with the `-v` output naming the last test that started.
 
 * **`REQUIRE_MPV: '1'`** turns "no mpv found" from a skip into a hard error. A
   mistyped `MPV_BINARY` otherwise skips every live test and the build reports

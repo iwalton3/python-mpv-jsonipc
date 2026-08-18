@@ -43,10 +43,16 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-latest
-    # A hung job otherwise sits on a runner for six hours. Two of these
-    # wedged in apt for 22+ minutes while the test step -- 12 seconds -- had
-    # not even started.
-    timeout-minutes: 15
+    # A hung job otherwise sits on a runner for six hours. These have wedged
+    # in apt more than once while the test step -- 12 seconds -- had not even
+    # started.
+    #
+    # Deliberately LARGER than the step timeouts below (12 + 10 + setup), so
+    # a stall fails the step that caused it, by name. A job timeout smaller
+    # than its steps' reports a "cancelled" job and hides which step stalled,
+    # which is how the first of these was nearly misread as someone pressing
+    # cancel.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -57,17 +63,37 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install mpv
-        # DEBIAN_FRONTEND is load-bearing, not decoration: without it a
-        # post-install prompt (needrestart's service menu, a conffile
-        # question) waits for an answer nobody can give, and the job hangs
-        # rather than fails. Measured: this step takes ~4 minutes when it
-        # works and hung indefinitely when it did not.
+        # This step has hung twice, and DEBIAN_FRONTEND alone did not stop
+        # it -- so an interactive prompt is not the cause, and the remaining
+        # suspects are apt lock contention (the runner's own unattended
+        # upgrades) and a stalled mirror. Rather than guess which, defend
+        # against both and bound the whole thing:
+        #   - the background apt services are stopped first;
+        #   - DPkg::Lock::Timeout waits for a lock instead of blocking
+        #     forever, then gives up;
+        #   - Acquire::Retries survives a flaky mirror;
+        #   - each attempt gets `timeout`, and there are two attempts, so a
+        #     stalled mirror costs minutes rather than the job;
+        #   - timeout-minutes fails THIS step by name. Without it the job
+        #     timeout fires instead and reports a cancelled job, which reads
+        #     like someone pressed cancel.
+        # Measured: ~4 minutes when healthy, 14m57s when not.
+        timeout-minutes: 12
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            -o Dpkg::Options::=--force-confnew mpv
+          sudo systemctl stop apt-daily.service apt-daily-upgrade.service \
+            unattended-upgrades.service 2>/dev/null || true
+          sudo systemctl kill --kill-who=all apt-daily.service 2>/dev/null || true
+          install_mpv() {
+            sudo timeout 240 apt-get -o DPkg::Lock::Timeout=120 \
+              -o Acquire::Retries=3 update
+            sudo timeout 300 apt-get -o DPkg::Lock::Timeout=120 \
+              -o Acquire::Retries=3 install -y --no-install-recommends \
+              -o Dpkg::Options::=--force-confnew mpv
+          }
+          install_mpv || { echo "::warning::apt stalled; retrying once"; install_mpv; }
+          mpv --version | head -1
       - name: Run tests
         # No xvfb: every live test runs mpv with --vo=null, so nothing opens
         # a window.
