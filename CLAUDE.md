@@ -44,6 +44,27 @@ A separate `EventHandler` thread serializes user callbacks (events, property obs
   own comment — and `CreateFile` against a busy pipe fails with
   `ERROR_PIPE_BUSY`, an `OSError`. The retry is what turns that race into a
   connection a moment later rather than a hard failure. Keep it.
+- **OBSERVED 2026-08-18: the Windows transport can abort the interpreter on
+  Python 3.14.** `Fatal Python error: _PySemaphore_Wakeup: parking_lot:
+  ReleaseSemaphore failed (error: 6)` — ERROR_INVALID_HANDLE on a
+  *CPython-internal* semaphore, i.e. the symptom of handle/heap corruption
+  rather than an error path. Seen in CI roughly 1 run in 8, always under
+  `terminate()` → `MPVInter.stop` → `WindowsSocket.stop` → `join`.
+  The mechanism: `PipeConnection._recv_bytes` parks the reader thread in
+  `WaitForMultipleObjects([ov.event], INFINITE)` with an **overlapped read
+  still pending** on the handle and a kernel-owned buffer inside `ov`, and
+  `WindowsSocket.stop` then calls `close()` on that handle **from another
+  thread**. Closing a handle with I/O outstanding is undefined; the kernel
+  may still write into a buffer that is being torn down. CPython 3.13+
+  replaced its thread primitives with the parking-lot `_PySemaphore`, which
+  is why latent corruption now aborts instead of passing unnoticed. This is
+  exactly the failure the Windows version matrix exists to catch — a Python
+  upgrade breaking us with no change of ours — and it argues for the ctypes
+  or vendored rewrite below rather than a patch. A correct fix has the thread
+  that owns the blocking read own the handle: wake it (broken pipe or a
+  sentinel) and let it close its own handle, instead of closing underneath
+  it. Do not "fix" this by only bounding the join; that hides the abort
+  behind a timeout without removing the corruption.
 - **The Windows transport is built on two CPython internals with no compatibility contract**, and this is deliberate. `_winapi` is a private C extension; `PipeConnection` is not in `multiprocessing.connection.__all__` (which is `['Client', 'Listener', 'Pipe', 'wait']`), is defined conditionally inside `if _winapi:`, and is an implementation detail of `Pipe()` — we construct it from a handle we opened ourselves with `FILE_FLAG_OVERLAPPED`. It was chosen over `pywin32` because every native dependency costs downstream projects a PyInstaller fight (hooks, `pythoncom`/`pywintypes` DLLs, post-install registration), and it has held for six years. **Do not "tidy" these imports away** — a plain `open(r'\\.\pipe\...')` cannot do overlapped I/O, and `stop()` relies on closing the handle to break a blocked read. If they ever have to go, the replacement is `ctypes` against `kernel32` (stdlib, no hooks, PyInstaller-clean — the same property that motivated the original choice), or vendoring the ~80 lines of `_close`/`_send_bytes`/`_recv_bytes`/`_get_more_data` from CPython's `connection.py` under the PSF licence. Note this breaks on a *Python* upgrade rather than a code change, which is why the Windows CI leg needs a version matrix on a schedule, including prereleases.
 
 ## Testing
