@@ -1,0 +1,188 @@
+{
+  "classes": {
+    "EventHandler": {
+      "bases": [
+        "Thread"
+      ],
+      "methods": {
+        "__init__": "(self)",
+        "getName": "(self)",
+        "isDaemon": "(self)",
+        "is_alive": "(self)",
+        "join": "(self, timeout=None)",
+        "put_task": "(self, func, *args)",
+        "run": "(self)",
+        "setDaemon": "(self, daemonic)",
+        "setName": "(self, name)",
+        "start": "(self)",
+        "stop": "(self, join=True)"
+      }
+    },
+    "MPV": {
+      "bases": [
+        "object"
+      ],
+      "methods": {
+        "__init__": "(self, start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, quit_callback=None, start_retries=5, start_retry_delay_ms=1000, **kwargs)",
+        "bind_event": "(self, name, callback)",
+        "bind_key_press": "(self, name, callback)",
+        "bind_property_observer": "(self, name, callback)",
+        "command": "(self, command, *args)",
+        "event_callback": "(self, name)",
+        "on_event": "(self, name)",
+        "on_key_press": "(self, name)",
+        "play": "(self, url)",
+        "property_observer": "(self, name)",
+        "terminate": "(self, join=True)",
+        "unbind_property_observer": "(self, observer_id)",
+        "wait_for_property": "(self, name)"
+      }
+    },
+    "MPVError": {
+      "bases": [
+        "Exception"
+      ],
+      "methods": {
+        "__init__": "(self, *args, **kwargs)",
+        "add_note": "(self, object, /)",
+        "with_traceback": "(self, object, /)"
+      }
+    },
+    "MPVInter": {
+      "bases": [
+        "object"
+      ],
+      "methods": {
+        "__init__": "(self, ipc_socket, callback=None, quit_callback=None)",
+        "command": "(self, command, *args)",
+        "event_callback": "(self, data)",
+        "stop": "(self, join=True)"
+      }
+    },
+    "MPVProcess": {
+      "bases": [
+        "object"
+      ],
+      "methods": {
+        "__init__": "(self, ipc_socket, mpv_location=None, **kwargs)",
+        "stop": "(self)"
+      }
+    },
+    "UnixSocket": {
+      "bases": [
+        "Thread"
+      ],
+      "methods": {
+        "__init__": "(self, ipc_socket, callback=None, quit_callback=None)",
+        "getName": "(self)",
+        "isDaemon": "(self)",
+        "is_alive": "(self)",
+        "join": "(self, timeout=None)",
+        "run": "(self)",
+        "send": "(self, data)",
+        "setDaemon": "(self, daemonic)",
+        "setName": "(self, name)",
+        "start": "(self)",
+        "stop": "(self, join=True)"
+      }
+    },
+    "WindowsSocket": {
+      "bases": [
+        "Thread"
+      ],
+      "methods": {
+        "__init__": "(self, ipc_socket, callback=None, quit_callback=None)",
+        "getName": "(self)",
+        "isDaemon": "(self)",
+        "is_alive": "(self)",
+        "join": "(self, timeout=None)",
+        "run": "(self)",
+        "send": "(self, data)",
+        "setDaemon": "(self, daemonic)",
+        "setName": "(self, name)",
+        "start": "(self)",
+        "stop": "(self, join=True)"
+      }
+    }
+  },
+  "constants": {
+    "FALLBACK_COMMAND_LIST": [
+      "ignore",
+      "seek",
+      "revert-seek",
+      "quit",
+      "quit-watch-later",
+      "stop",
+      "frame-step",
+      "frame-back-step",
+      "playlist-next",
+      "playlist-prev",
+      "playlist-shuffle",
+      "playlist-unshuffle",
+      "sub-step",
+      "sub-seek",
+      "print-text",
+      "show-text",
+      "expand-text",
+      "expand-path",
+      "show-progress",
+      "sub-add",
+      "audio-add",
+      "video-add",
+      "sub-remove",
+      "audio-remove",
+      "video-remove",
+      "sub-reload",
+      "audio-reload",
+      "video-reload",
+      "rescan-external-files",
+      "screenshot",
+      "screenshot-to-file",
+      "screenshot-raw",
+      "loadfile",
+      "loadlist",
+      "playlist-clear",
+      "playlist-remove",
+      "playlist-move",
+      "run",
+      "subprocess",
+      "set",
+      "change-list",
+      "add",
+      "cycle",
+      "multiply",
+      "cycle-values",
+      "enable-section",
+      "disable-section",
+      "define-section",
+      "ab-loop",
+      "drop-buffers",
+      "af",
+      "vf",
+      "af-command",
+      "vf-command",
+      "ao-reload",
+      "script-binding",
+      "script-message",
+      "script-message-to",
+      "overlay-add",
+      "overlay-remove",
+      "osd-overlay",
+      "write-watch-later-config",
+      "hook-add",
+      "hook-ack",
+      "mouse",
+      "keybind",
+      "keypress",
+      "keydown",
+      "keyup",
+      "apply-profile",
+      "load-script",
+      "dump-cache",
+      "ab-loop-dump-cache",
+      "ab-loop-align-cache"
+    ],
+    "TIMEOUT": 120
+  },
+  "functions": {}
+}

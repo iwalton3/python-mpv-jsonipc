@@ -1,0 +1,161 @@
+# The Windows legs are the point of this file.
+#
+# `WindowsSocket` is a separate implementation from `UnixSocket`, built on
+# `_winapi` and `multiprocessing.connection.PipeConnection` -- a private C
+# extension and an undocumented class that is not in that module's `__all__`.
+# Neither carries a compatibility guarantee, which means this library can break
+# on a *Python* upgrade with no change of ours and no deprecation warning to
+# read. Roughly 78 repositories depend on this module, several unmaintained, so
+# "we find out when a user reports it" is not an acceptable detector.
+#
+# Hence: a wide Python matrix on Windows, a scheduled run so the alarm goes off
+# without a commit, and a frozen-binary job because "works under PyInstaller
+# with no dependencies" is the property people actually adopted this for and
+# nothing else here can see it.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Mondays. Nothing in the repo changes between these runs; the
+    # interpreters underneath it do.
+    - cron: '0 6 * * 1'
+
+env:
+  # Pinned for two reasons. The mild one: a per-PR failure should mean "we
+  # broke it", not "mpv shipped today". The load-bearing one: shinchiro's
+  # builds from 20260808 onward link vulkan-1.dll as a HARD import, and the
+  # Vulkan loader is a driver-installed system component that a CI runner has
+  # no reason to have -- so a newer mpv simply refuses to start there, and
+  # every live test would fail for a reason that has nothing to do with this
+  # library. 20260610 is the last clean release. jellyfin-mpv-shim pins the
+  # same build for the same regression; raise both together once upstream is
+  # fixed.
+  MPV_WINDOWS_RELEASE: '20260610'
+  # Turns "no mpv found" from a skip into a hard error. Without it, a wrong
+  # MPV_BINARY skips every live test and the build goes green having tested
+  # nothing -- the most expensive kind of passing CI.
+  REQUIRE_MPV: '1'
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install mpv
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mpv
+      - name: Run tests
+        # No xvfb: every live test runs mpv with --vo=null, so nothing opens
+        # a window.
+        run: python -m unittest discover tests -v
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Wider than Linux on purpose -- this is the axis the private-API
+        # dependency actually breaks along.
+        python: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: Download mpv
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          # The plain x86_64 build, not -v3: that one targets a newer
+          # microarchitecture level and the pattern must not match it.
+          gh release download "$env:MPV_WINDOWS_RELEASE" `
+            --repo shinchiro/mpv-winbuild-cmake `
+            --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          7z x mpv-dist\*.7z -ompv
+          # Found, not assumed: if the archive ever grows a top-level
+          # directory, a hard-coded path would silently point at nothing.
+          $exe = (Get-ChildItem -Path mpv -Recurse -Filter mpv.exe |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "mpv.exe not found after extraction" }
+          "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Run tests
+        shell: pwsh
+        run: python -m unittest discover tests -v
+
+  windows-python-prerelease:
+    # The early-warning leg. Allowed to fail: a broken prerelease of Python
+    # is information, not a reason to block a merge.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.15-dev']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: Download mpv
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release download "$env:MPV_WINDOWS_RELEASE" `
+            --repo shinchiro/mpv-winbuild-cmake `
+            --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          7z x mpv-dist\*.7z -ompv
+          $exe = (Get-ChildItem -Path mpv -Recurse -Filter mpv.exe |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "mpv.exe not found after extraction" }
+          "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Run tests
+        shell: pwsh
+        run: python -m unittest discover tests -v
+
+  windows-frozen:
+    # "Works on Windows, frozen, with zero dependencies" is why this library
+    # exists -- it was chosen over pywin32 precisely to avoid the PyInstaller
+    # tax. The golden API snapshot cannot see a packaging regression; this can.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download mpv
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release download "$env:MPV_WINDOWS_RELEASE" `
+            --repo shinchiro/mpv-winbuild-cmake `
+            --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          7z x mpv-dist\*.7z -ompv
+          # Found, not assumed: if the archive ever grows a top-level
+          # directory, a hard-coded path would silently point at nothing.
+          $exe = (Get-ChildItem -Path mpv -Recurse -Filter mpv.exe |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "mpv.exe not found after extraction" }
+          "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Freeze a client with PyInstaller
+        run: |
+          pip install pyinstaller
+          pyinstaller --onefile --name freeze_smoke tests/freeze_smoke.py
+      - name: Run the frozen client against real mpv
+        shell: pwsh
+        run: .\dist\freeze_smoke.exe
