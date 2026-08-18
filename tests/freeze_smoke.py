@@ -13,7 +13,15 @@ Exits non-zero with a message on any failure, so the CI step is the assertion.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if not getattr(sys, "frozen", False):
+    # Running from a checkout. Frozen, the module is bundled by PyInstaller
+    # from the *installed* package -- its analysis is static and cannot
+    # follow a sys.path insert, so a checkout-relative import would produce
+    # a binary with no library in it at all. (It did: "No module named
+    # python_mpv_jsonipc", the first time this job ran.) CI pip-installs
+    # before freezing, which is also what downstream projects do.
+    sys.path.insert(0,
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import python_mpv_jsonipc  # noqa: E402
 

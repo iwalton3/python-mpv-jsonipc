@@ -154,7 +154,11 @@ jobs:
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Freeze a client with PyInstaller
         run: |
-          pip install pyinstaller
+          # Install rather than freezing from the checkout: PyInstaller's
+          # analysis is static, so it cannot follow a runtime sys.path
+          # insert and would bundle no library at all. Installing first is
+          # also what a downstream project actually does.
+          pip install . pyinstaller
           pyinstaller --onefile --name freeze_smoke tests/freeze_smoke.py
       - name: Run the frozen client against real mpv
         shell: pwsh

@@ -170,7 +170,11 @@ Monday `schedule:` run and a `3.15-dev` leg (`continue-on-error`) to hear about
 it before users do. A `windows-frozen` job PyInstaller-freezes
 `tests/freeze_smoke.py` and runs it against real mpv, because "works frozen,
 with no dependencies" is the property this library was adopted for and no
-in-process test can see it.
+in-process test can see it. **It `pip install .` first, and must**:
+PyInstaller's analysis is static, so it cannot follow the checkout-relative
+`sys.path` insert a script run from a source tree needs, and freezing without
+installing produces a binary containing no library at all — which is how that
+job failed the first time it ran.
 
 Two things in there are load-bearing and easy to undo by accident:
 
