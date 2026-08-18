@@ -547,6 +547,7 @@ class MPV:
             # Attempt to start MPV multiple times.
             last_error = None
             diagnosed = False
+            log_output = None
             for i in range(start_retries):
                 try:
                     self.mpv_process = MPVProcess(ipc_socket, mpv_location, **kwargs)
@@ -565,7 +566,14 @@ class MPV:
                     argv = getattr(error, "argv", None)
                     if diagnose_start_failures and argv and not diagnosed:
                         diagnosed = True
-                        bad_option, log_output = _diagnose_start_failure(argv)
+                        bad_option, diagnosis = _diagnose_start_failure(argv)
+                        # Keep what MPV said even when it does not name an
+                        # option. Refusing to start over a missing DLL or an
+                        # unusable VO is the same predicament from the user's
+                        # side -- something they changed, and nothing to go
+                        # on -- and on Windows there is no console for them to
+                        # have seen it in. It rides out on .log_output below.
+                        log_output = diagnosis
                         if bad_option is not None:
                             raise MPVProcessError(
                                 "MPV rejected the option --{0}.".format(
@@ -585,7 +593,7 @@ class MPV:
                 raise MPVProcessError(
                     "MPV process retry limit reached.",
                     returncode=getattr(last_error, "returncode", None),
-                    log_output=getattr(last_error, "log_output", None),
+                    log_output=log_output,
                     argv=getattr(last_error, "argv", None))
 
         self.mpv_inter = MPVInter(ipc_socket, self._callback, self._quit_callback)

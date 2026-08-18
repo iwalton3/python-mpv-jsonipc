@@ -99,6 +99,20 @@ class BadOptionTest(unittest.TestCase):
             self.start_with_bad_option(ipc_socket=socket_path)
         self.assertFalse(os.path.exists(socket_path))
 
+    def test_mpvs_own_words_survive_even_when_no_option_is_named(self):
+        # Not every refusal is an option error -- a missing DLL or an
+        # unusable VO reads the same way to a user: something changed and
+        # there is nothing to go on. On Windows especially there is no
+        # console they could have seen it in. So whatever MPV said is
+        # attached even when the diagnosis cannot name an option.
+        with mock.patch.object(python_mpv_jsonipc, "_diagnose_start_failure",
+                               return_value=(None, "mpv: some other refusal")):
+            with self.assertRaises(python_mpv_jsonipc.MPVProcessError) as caught:
+                self.start_with_bad_option(start_retries=2)
+        self.assertEqual(str(caught.exception),
+                         "MPV process retry limit reached.")
+        self.assertEqual(caught.exception.log_output, "mpv: some other refusal")
+
     def test_a_failure_it_cannot_explain_still_retries_and_reports_as_before(self):
         # The diagnosis is not always conclusive -- mpv may have died for a
         # reason it did not write down. That path must behave exactly as it
