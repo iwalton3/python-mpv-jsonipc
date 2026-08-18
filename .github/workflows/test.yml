@@ -112,12 +112,16 @@ jobs:
         run: python -m unittest discover tests -v
 
   windows-python-prerelease:
-    # The early-warning leg. Allowed to fail: a broken prerelease of Python
-    # is information, not a reason to block a merge.
+    # The early-warning leg, and deliberately NOT continue-on-error.
+    #
+    # It cannot block anyone: it never runs on push or pull_request. So the
+    # only thing `continue-on-error` bought was a green run containing a red
+    # job -- and GitHub notifies on a failed *run*, not on a failed job inside
+    # a passing one. An early warning nobody is told about warns nobody, which
+    # would have quietly defeated the entire point of this job.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 15
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:

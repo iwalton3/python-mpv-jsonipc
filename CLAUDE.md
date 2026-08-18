@@ -166,8 +166,13 @@ than rediscovered:
 `.github/workflows/test.yml` — Linux (3.9/3.11/3.13) and **Windows
 (3.9-3.14)**. The Windows matrix is wider on purpose: `_winapi` and
 `PipeConnection` break along the *Python* axis, not ours, so there is also a
-Monday `schedule:` run and a `3.15-dev` leg (`continue-on-error`) to hear about
-it before users do. A `windows-frozen` job PyInstaller-freezes
+Monday `schedule:` run and a `3.15-dev` leg to hear about it before users do.
+That job is deliberately **not** `continue-on-error`: it never runs on push or
+pull_request, so it cannot block anyone, and GitHub notifies on a failed *run*
+rather than a failed job inside a passing one — swallowing its failure would
+mean an early warning nobody is ever told about. Trigger it by hand with
+`gh workflow run test.yml --ref <branch>`, which works on a branch even though
+the workflow is not on `master` yet. A `windows-frozen` job PyInstaller-freezes
 `tests/freeze_smoke.py` and runs it against real mpv, because "works frozen,
 with no dependencies" is the property this library was adopted for and no
 in-process test can see it. **It `pip install .` first, and must**:
