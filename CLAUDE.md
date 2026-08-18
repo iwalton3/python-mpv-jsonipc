@@ -124,6 +124,15 @@ than rediscovered:
 * **A missing mpv binary raises `FileNotFoundError`, not `MPVError`**, so it
   escapes the retry loop on the first attempt. jellyfin-mpv-shim depends on
   that to tell "no mpv installed" from "mpv rejected an option".
+* **The two transports fail differently when nothing is listening**, which the
+  Windows CI leg found and reading the code did not. `UnixSocket` fails its
+  `connect` and raises `OSError` immediately; `WindowsSocket` retries
+  `CreateFile` five times a second apart and then raises
+  `MPVError("Cannot connect to pipe.")`, which is **not** an `OSError`. So
+  `except OSError:` around `MPV(start_mpv=False, ...)` is correct on Linux and
+  wrong on Windows, and the Windows path also costs five seconds before it
+  says so. Pinned per platform in `test_live_failure.py` rather than widened
+  to `Exception`, because the divergence is the point.
 
 ### CI
 

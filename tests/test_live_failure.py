@@ -88,11 +88,26 @@ class MissingBinaryTest(unittest.TestCase):
 class NoServerTest(unittest.TestCase):
     def test_attaching_to_a_socket_nothing_is_listening_on_raises(self):
         # start_mpv=False means "something else owns the process". If the
-        # endpoint is not there, the transport raises straight out of the
-        # constructor rather than waiting.
-        with self.assertRaises(OSError):
+        # endpoint is not there, the transport raises out of the constructor
+        # rather than waiting -- but *which* exception is a real divergence
+        # between the two transports, found by the Windows CI leg rather than
+        # by reading the code:
+        #
+        #   UnixSocket    -> socket.connect fails -> OSError, immediately.
+        #   WindowsSocket -> CreateFile fails -> five attempts a second apart
+        #                    -> MPVError("Cannot connect to pipe."), which is
+        #                    NOT an OSError.
+        #
+        # Pinned per platform rather than widened to `Exception`, because the
+        # difference is the thing worth knowing: code that catches OSError
+        # around this constructor works on Linux and not on Windows.
+        expected = (python_mpv_jsonipc.MPVError if os.name == "nt"
+                    else OSError)
+        with self.assertRaises(expected):
             python_mpv_jsonipc.MPV(start_mpv=False,
-                                   ipc_socket="/tmp/definitely-no-mpv-here")
+                                   ipc_socket="definitely-no-mpv-here"
+                                   if os.name == "nt"
+                                   else "/tmp/definitely-no-mpv-here")
 
 
 @requires_mpv
