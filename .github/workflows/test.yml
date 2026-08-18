@@ -43,6 +43,10 @@ env:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    # A hung job otherwise sits on a runner for six hours. Two of these
+    # wedged in apt for 22+ minutes while the test step -- 12 seconds -- had
+    # not even started.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -53,14 +57,26 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install mpv
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mpv
+        # DEBIAN_FRONTEND is load-bearing, not decoration: without it a
+        # post-install prompt (needrestart's service menu, a conffile
+        # question) waits for an answer nobody can give, and the job hangs
+        # rather than fails. Measured: this step takes ~4 minutes when it
+        # works and hung indefinitely when it did not.
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::=--force-confnew mpv
       - name: Run tests
         # No xvfb: every live test runs mpv with --vo=null, so nothing opens
         # a window.
+        timeout-minutes: 10
         run: python -m unittest discover tests -v
 
   windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -92,6 +108,7 @@ jobs:
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Run tests
         shell: pwsh
+        timeout-minutes: 10
         run: python -m unittest discover tests -v
 
   windows-python-prerelease:
@@ -99,6 +116,7 @@ jobs:
     # is information, not a reason to block a merge.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    timeout-minutes: 15
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -125,9 +143,11 @@ jobs:
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Run tests
         shell: pwsh
+        timeout-minutes: 10
         run: python -m unittest discover tests -v
 
   windows-frozen:
+    timeout-minutes: 15
     # "Works on Windows, frozen, with zero dependencies" is why this library
     # exists -- it was chosen over pywin32 precisely to avoid the PyInstaller
     # tax. The golden API snapshot cannot see a packaging regression; this can.

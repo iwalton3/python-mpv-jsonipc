@@ -176,7 +176,17 @@ PyInstaller's analysis is static, so it cannot follow the checkout-relative
 installing produces a binary containing no library at all — which is how that
 job failed the first time it ran.
 
-Two things in there are load-bearing and easy to undo by accident:
+Three things in there are load-bearing and easy to undo by accident:
+
+* **`DEBIAN_FRONTEND: noninteractive` on the Linux mpv install, and
+  `timeout-minutes` on every job.** Two Linux legs once sat wedged in
+  `apt-get install mpv` for 22+ minutes — not in the tests, which take 12
+  seconds on the same runner and had not started. Without a frontend setting a
+  post-install prompt waits for an answer nobody can give, so the job *hangs*
+  rather than fails, and an unbounded GitHub job holds a runner for six hours.
+  The test step has its own shorter timeout so a genuine test hang fails with
+  the `-v` output naming the last test that started, instead of timing out the
+  whole job with nothing to read.
 
 * **`REQUIRE_MPV: '1'`** turns "no mpv found" from a skip into a hard error. A
   mistyped `MPV_BINARY` otherwise skips every live test and the build reports
