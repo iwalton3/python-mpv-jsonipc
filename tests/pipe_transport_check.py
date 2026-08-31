@@ -53,6 +53,9 @@ import python_mpv_jsonipc as m  # noqa: E402
 
 _INVALID = ctypes.c_void_p(-1).value
 _ERROR_PIPE_CONNECTED = 535
+_GENERIC_READ = 0x80000000
+_GENERIC_WRITE = 0x40000000
+_OPEN_EXISTING = 3
 
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _k32.CreateNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.DWORD,
@@ -63,6 +66,9 @@ _k32.ReadFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, w.LPDWORD,
                           ctypes.c_void_p]
 _k32.WriteFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, w.LPDWORD,
                            ctypes.c_void_p]
+_k32.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p,
+                             w.DWORD, w.DWORD, w.HANDLE]
+_k32.CreateFileW.restype = w.HANDLE
 _k32.DisconnectNamedPipe.argtypes = [w.HANDLE]
 _k32.DisconnectNamedPipe.restype = w.BOOL
 _k32.CloseHandle.argtypes = [w.HANDLE]
@@ -75,8 +81,11 @@ class Peer(threading.Thread):
 
     def __init__(self, name):
         threading.Thread.__init__(self)
+        # `pipe_name`, not `name`: Thread owns `name`. Same trap as the
+        # library's `_handle`, and worth stating twice.
+        self.pipe_name = r"\\.\pipe" + "\\" + name
         self.handle = _k32.CreateNamedPipeW(
-            r"\\.\pipe" + "\\" + name, 3, 0, 1, 65536, 65536, 0, None)
+            self.pipe_name, 3, 0, 1, 65536, 65536, 0, None)
         assert self.handle != _INVALID, ctypes.get_last_error()
         self.received = []
         self.ready = threading.Event()
@@ -99,14 +108,25 @@ class Peer(threading.Thread):
                        None)
 
     def close(self):
-        # Disconnect, join, THEN close. Closing the handle while this peer's
-        # own thread is parked in a blocking ReadFile on it is precisely the
-        # pattern this harness exists to prove absent from the library -- and
-        # at 50k cycles on a real runner, a harness-side abort or stuck thread
-        # would be blamed on WindowsSocket, which is the one thing this must
-        # never do.
-        _k32.DisconnectNamedPipe(self.handle)
-        self.join(5)
+        if self.is_alive() and not self.ready.is_set():
+            # Nobody ever connected, so this peer is parked in a *synchronous*
+            # ConnectNamedPipe. On real Windows CloseHandle then blocks until
+            # that IRP completes, which it never does -- a 13-minute hang that
+            # wine does not reproduce and that the first real run found.
+            # Connecting and dropping a throwaway client releases it.
+            client = _k32.CreateFileW(self.pipe_name,
+                                      _GENERIC_READ | _GENERIC_WRITE, 0, None,
+                                      _OPEN_EXISTING, 0, None)
+            if client != _INVALID:
+                _k32.CloseHandle(client)
+        if self.is_alive():
+            # Disconnect, join, THEN close. Closing the handle while this
+            # peer's own thread is parked in a read on it is precisely the
+            # pattern this harness exists to prove absent from the library --
+            # and at 50k cycles a harness-side hang would be blamed on
+            # WindowsSocket, which is the one thing this must never do.
+            _k32.DisconnectNamedPipe(self.handle)
+            self.join(5)
         _k32.CloseHandle(self.handle)
 
 
@@ -193,8 +213,9 @@ def test_no_listener():
 
 
 def test_endpoint_readiness():
+    # Deliberately not started: _ipc_endpoint_ready only asks whether the pipe
+    # exists, and an acceptor nothing ever connects to is the hang above.
     peer = Peer("wine-readiness")
-    peer.start()
     check("_ipc_endpoint_ready sees a live pipe",
           m._ipc_endpoint_ready(r"\\.\pipe\wine-readiness"))
     check("_ipc_endpoint_ready does not see a missing one",

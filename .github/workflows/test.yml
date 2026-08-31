@@ -237,8 +237,17 @@ jobs:
         shell: pwsh
         timeout-minutes: 15
         env:
-          TRANSPORT_CHECK_TIMEOUT: '780'
-        run: python tests/pipe_transport_check.py 50000
+          # Just under the step timeout, so a genuine hang is reported by the
+          # harness -- naming the test it hung in -- rather than by GitHub
+          # killing the step with no output. That distinction already paid:
+          # the first real run hung in the harness itself, and the watchdog
+          # is what said where.
+          TRANSPORT_CHECK_TIMEOUT: '840'
+        # 20k rather than 50k until there is a measurement to size it from.
+        # Real-Windows throughput is still unknown (the first run hung before
+        # reaching the cycles), and a count that overruns the watchdog would
+        # fail as a hang, which is the one signal this leg must keep honest.
+        run: python tests/pipe_transport_check.py 20000
       - name: Stress the full teardown against real mpv
         # Fewer cycles, but the whole `MPV.terminate()` path with the event
         # handler and process supervision in place -- the shape both real
