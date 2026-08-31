@@ -243,20 +243,29 @@ jobs:
           # the first real run hung in the harness itself, and the watchdog
           # is what said where.
           TRANSPORT_CHECK_TIMEOUT: '840'
-        # 20k rather than 50k until there is a measurement to size it from.
-        # Real-Windows throughput is still unknown (the first run hung before
-        # reaching the cycles), and a count that overruns the watchdog would
-        # fail as a hang, which is the one signal this leg must keep honest.
-        run: python tests/pipe_transport_check.py 20000
+        # Sized from measurement, and deliberately modest: this harness does
+        # NOT reproduce the teardown corruption -- 20k cycles of the *old*
+        # PipeConnection build pass on real Windows 3.14 -- so extra cycles
+        # here buy nothing for that bug. It stays as a behaviour, leak and
+        # prototype check, and the mpv step below is the actual detector.
+        run: python tests/pipe_transport_check.py 5000
       - name: Stress the full teardown against real mpv
-        # Fewer cycles, but the whole `MPV.terminate()` path with the event
+        # This is the detector. The whole `MPV.terminate()` path with the event
         # handler and process supervision in place -- the shape both real
-        # aborts actually arrived in, and the one a loopback pipe cannot model.
+        # aborts arrived in, and the only one that reproduces the corruption:
+        # on a Windows VM the old build aborted on both of two 3000-cycle runs
+        # while the loopback harness above never did.
+        #
+        # Sized from that: ~0.11s per teardown and roughly one abort per
+        # 2500-3000 on the vulnerable build, so 6000 cycles is ~11 minutes and
+        # carries real power to catch a regression, where 1200 mostly would
+        # not. Keep the step timeout well above it, and the watchdog below the
+        # step timeout so a genuine hang is named rather than killed.
         shell: pwsh
         timeout-minutes: 25
         env:
-          STRESS_TIMEOUT: '1200'
-        run: python tests/stress_teardown.py 1200
+          STRESS_TIMEOUT: '1080'
+        run: python tests/stress_teardown.py 6000
 
   windows-frozen:
     timeout-minutes: 15
