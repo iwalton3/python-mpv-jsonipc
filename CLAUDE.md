@@ -270,6 +270,15 @@ PyInstaller's analysis is static, so it cannot follow the checkout-relative
 installing produces a binary containing no library at all — which is how that
 job failed the first time it ran.
 
+A **`windows-stress`** job (scheduled/manual, 3.13/3.14/3.15-dev) hunts the
+teardown corruption at volume: 50k loopback-pipe cycles, then 1.2k full
+`terminate()` cycles against real mpv. It is on those interpreters because
+3.13+ makes the corruption *loud* — older ones are quieter, not safer, so
+stressing them would mostly buy silence. **Do not read a green run as proof.**
+At ~1 abort per 850 teardowns this leg buys probability; it is a regression
+detector, not a correctness proof, and its comment says so because that is the
+mistake it invites.
+
 Three things in there are load-bearing and easy to undo by accident:
 
 * **The Linux `Install mpv` step is defended and bounded, because it hangs.**

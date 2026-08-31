@@ -1,17 +1,20 @@
 # The Windows legs are the point of this file.
 #
-# `WindowsSocket` is a separate implementation from `UnixSocket`, built on
-# `_winapi` and `multiprocessing.connection.PipeConnection` -- a private C
-# extension and an undocumented class that is not in that module's `__all__`.
-# Neither carries a compatibility guarantee, which means this library can break
-# on a *Python* upgrade with no change of ours and no deprecation warning to
-# read. Roughly 78 repositories depend on this module, several unmaintained, so
-# "we find out when a user reports it" is not an acceptable detector.
+# `WindowsSocket` is a separate implementation from `UnixSocket`, driving
+# overlapped I/O on a named pipe through `ctypes` against `kernel32`. It
+# depends on Windows and interpreter behaviour rather than on anything this
+# repo controls, so it can break on a *Python* upgrade with no change of ours
+# and no deprecation warning to read. That is not hypothetical: the scheduled
+# run caught an interpreter-aborting teardown bug twice, on 3.13 and on 3.14,
+# the second time on a `master` nobody had touched. Roughly 78 repositories
+# depend on this module, several unmaintained, so "we find out when a user
+# reports it" is not an acceptable detector.
 #
-# Hence: a wide Python matrix on Windows, a scheduled run so the alarm goes off
-# without a commit, and a frozen-binary job because "works under PyInstaller
-# with no dependencies" is the property people actually adopted this for and
-# nothing else here can see it.
+# Hence: a wide Python matrix on Windows, a scheduled run so the alarm goes
+# off without a commit, a frozen-binary job because "works under PyInstaller
+# with no dependencies" is the property people actually adopted this for, and
+# a stress leg because the bug above appeared roughly once in 850 teardowns --
+# a rate the ~35 teardowns of a normal run cannot see.
 
 name: tests
 
@@ -175,6 +178,76 @@ jobs:
         shell: pwsh
         timeout-minutes: 10
         run: python -m unittest discover tests -v
+
+  windows-stress:
+    # Hunts the teardown corruption fixed on 2026-08-31: `stop()` closing the
+    # pipe handle while an overlapped read was still pending, which the kernel
+    # could complete into a buffer Python was tearing down. It does not raise
+    # -- it aborts the interpreter with `Fatal Python error:
+    # _PySemaphore_Wakeup` -- so the process exit status is the assertion and
+    # repetition is the whole method.
+    #
+    # **A green run here is not proof.** The observed rate was about 1 abort
+    # in 850 teardowns, so this leg buys probability, not certainty, and a
+    # single green run must never be read as "the corruption is gone". What it
+    # does buy is a detector with enough exposures to notice a regression
+    # before a user does, which the ~35 teardowns of a normal run cannot.
+    #
+    # Scheduled and manual only: it is slow, it cannot block a PR, and like
+    # the prerelease leg it is deliberately NOT continue-on-error, because
+    # GitHub notifies on a failed *run* rather than a red job inside a green
+    # one.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    # Larger than its steps (15 + 25 + download), so a stall fails the step
+    # that caused it by name instead of reporting a cancelled job.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The interpreters where this corruption is *loud*. 3.13+ allocates
+        # thread primitives from the parking lot, which is why latent
+        # corruption aborts instead of passing unnoticed -- both real
+        # sightings were here. Older Pythons are not safer, only quieter, so
+        # stressing them would mostly buy silence.
+        python: ['3.13', '3.14', '3.15-dev']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: Download mpv
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release download "$env:MPV_WINDOWS_RELEASE" `
+            --repo shinchiro/mpv-winbuild-cmake `
+            --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          7z x mpv-dist\*.7z -ompv
+          $exe = (Get-ChildItem -Path mpv -Recurse -Filter mpv.exe |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "mpv.exe not found after extraction" }
+          "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Stress the transport teardown
+        # No mpv: a loopback named pipe stands in for it, so a cycle costs a
+        # pipe rather than a process start and the count can be large. This is
+        # where the volume comes from -- ~500 cycles/s locally.
+        shell: pwsh
+        timeout-minutes: 15
+        env:
+          TRANSPORT_CHECK_TIMEOUT: '780'
+        run: python tests/pipe_transport_check.py 50000
+      - name: Stress the full teardown against real mpv
+        # Fewer cycles, but the whole `MPV.terminate()` path with the event
+        # handler and process supervision in place -- the shape both real
+        # aborts actually arrived in, and the one a loopback pipe cannot model.
+        shell: pwsh
+        timeout-minutes: 25
+        env:
+          STRESS_TIMEOUT: '1200'
+        run: python tests/stress_teardown.py 1200
 
   windows-frozen:
     timeout-minutes: 15
