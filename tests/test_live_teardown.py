@@ -30,6 +30,7 @@ that the cheap tests here cover postconditions, not interleavings.
 """
 
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -143,6 +144,90 @@ class TerminateWaitsTest(unittest.TestCase):
         mpv.terminate()
 
         self.assertIsNotNone(process.poll())
+
+
+class StopWaitingTest(unittest.TestCase):
+    """No mpv here: a stub is the only way to hold SIGTERM open on demand."""
+
+    class _Stubborn:
+        """Ignores terminate(); only kill() gets through."""
+
+        def __init__(self):
+            self.killed = False
+            self.waits = []
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            if self.killed:
+                return -9
+            raise python_mpv_jsonipc.subprocess.TimeoutExpired("mpv", timeout)
+
+    def _process(self, socket_name="absent.sock"):
+        process = python_mpv_jsonipc.MPVProcess.__new__(
+            python_mpv_jsonipc.MPVProcess)
+        process.process = self._Stubborn()
+        process.ipc_socket = os.path.join(tempfile.mkdtemp(), socket_name)
+        return process
+
+    def test_a_timeout_of_none_does_not_wait_at_all(self):
+        process = self._process()
+
+        process.stop(timeout=None)
+
+        self.assertEqual(process.process.waits, [])
+        self.assertFalse(process.process.killed)
+
+    def test_a_timeout_waits_then_escalates_to_kill(self):
+        process = self._process()
+
+        process.stop(timeout=0)
+
+        self.assertTrue(process.process.killed)
+        self.assertEqual(process.process.waits, [0, 0])
+
+    @unittest.skipIf(os.name == "nt", "POSIX socket files only")
+    def test_an_unlink_failure_that_is_not_the_race_is_not_swallowed(self):
+        # Only FileNotFoundError means "the other thread got there first".
+        # Swallowing every OSError would hide a permission problem or a path
+        # that is not the socket we think it is.
+        process = self._process()
+        with mock.patch("os.remove", side_effect=PermissionError("nope")):
+            with self.assertRaises(PermissionError):
+                process.stop(timeout=None)
+
+
+@requires_mpv
+class NonBlockingTerminateTest(unittest.TestCase):
+    def test_terminate_join_false_asks_the_process_not_to_wait(self):
+        # join=False is the non-blocking teardown, and the path
+        # _quit_callback takes from the reader thread. Waiting up to ten
+        # seconds there would block a caller who asked not to be blocked.
+        mpv = start_mpv()
+        self.addCleanup(mpv.terminate)
+
+        with mock.patch.object(mpv.mpv_process, "stop") as stop:
+            mpv.terminate(join=False)
+
+        # call_args_list[0], not call_args: terminate() re-enters itself.
+        # Closing the socket wakes the reader into _quit_callback, which calls
+        # terminate(join=False) again, so the *last* call is always the
+        # internal one whichever way the caller asked.
+        self.assertEqual(stop.call_args_list[0], mock.call(timeout=None))
+
+    def test_terminate_by_default_still_waits(self):
+        mpv = start_mpv()
+        self.addCleanup(mpv.terminate)
+
+        with mock.patch.object(mpv.mpv_process, "stop") as stop:
+            mpv.terminate()
+
+        self.assertEqual(stop.call_args_list[0], mock.call(timeout=5))
 
 
 @requires_mpv
