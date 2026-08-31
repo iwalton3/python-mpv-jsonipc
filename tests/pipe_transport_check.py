@@ -71,6 +71,9 @@ _k32.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p,
 _k32.CreateFileW.restype = w.HANDLE
 _k32.DisconnectNamedPipe.argtypes = [w.HANDLE]
 _k32.DisconnectNamedPipe.restype = w.BOOL
+_k32.PeekNamedPipe.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD,
+                               w.LPDWORD, w.LPDWORD, w.LPDWORD]
+_k32.PeekNamedPipe.restype = w.BOOL
 _k32.CloseHandle.argtypes = [w.HANDLE]
 
 
@@ -89,6 +92,7 @@ class Peer(threading.Thread):
         assert self.handle != _INVALID, ctypes.get_last_error()
         self.received = []
         self.ready = threading.Event()
+        self._closing = False
 
     def run(self):
         if not _k32.ConnectNamedPipe(self.handle, None):
@@ -97,8 +101,24 @@ class Peer(threading.Thread):
         self.ready.set()
         buf = ctypes.create_string_buffer(4096)
         read = w.DWORD(0)
-        while _k32.ReadFile(self.handle, buf, 4096, ctypes.byref(read),
-                            None) and read.value:
+        available = w.DWORD(0)
+        # Polled, never parked. A *blocking* ReadFile here leaves a pending
+        # IRP on the handle, and on real Windows CloseHandle then waits for
+        # that IRP forever -- neither DisconnectNamedPipe nor a join timeout
+        # releases it, which cost two CI rounds to learn. Wine unblocks
+        # happily, so this cannot be checked locally. Peeking first means the
+        # ReadFile only ever runs when it can return immediately, so the peer
+        # is always joinable and the handle is always safe to close.
+        while not self._closing:
+            if not _k32.PeekNamedPipe(self.handle, None, 0, None,
+                                      ctypes.byref(available), None):
+                return
+            if not available.value:
+                time.sleep(0.002)
+                continue
+            if not _k32.ReadFile(self.handle, buf, min(available.value, 4096),
+                                 ctypes.byref(read), None) or not read.value:
+                return
             self.received.append(buf.raw[:read.value])
 
     def write(self, obj):
@@ -108,6 +128,7 @@ class Peer(threading.Thread):
                        None)
 
     def close(self):
+        self._closing = True
         if self.is_alive() and not self.ready.is_set():
             # Nobody ever connected, so this peer is parked in a *synchronous*
             # ConnectNamedPipe. On real Windows CloseHandle then blocks until
@@ -120,18 +141,25 @@ class Peer(threading.Thread):
             if client != _INVALID:
                 _k32.CloseHandle(client)
         if self.is_alive():
-            # Disconnect, join, THEN close. Closing the handle while this
-            # peer's own thread is parked in a read on it is precisely the
-            # pattern this harness exists to prove absent from the library --
-            # and at 50k cycles a harness-side hang would be blamed on
-            # WindowsSocket, which is the one thing this must never do.
-            _k32.DisconnectNamedPipe(self.handle)
             self.join(5)
+            if self.is_alive():
+                # Never reach CloseHandle with this thread still running. If
+                # it is somehow still in an I/O call, closing under it blocks
+                # forever and gets reported as a library hang -- which is the
+                # one thing this harness must not do. A leaked handle is the
+                # far cheaper bug, and the thread check at the end of
+                # test_teardown_cycles turns it into a visible failure
+                # instead of a silent one.
+                _stuck_peers.append(self.pipe_name)
+                return
+            _k32.DisconnectNamedPipe(self.handle)
         _k32.CloseHandle(self.handle)
 
 
 _results = []
 _running = ["nothing yet"]
+#: Peers that would not shut down. See Peer.close.
+_stuck_peers = []
 
 
 def check(label, condition, detail=""):
@@ -246,6 +274,7 @@ def test_quit_callback():
     peer.ready.wait(5)
     peer.close()
     check("quit_callback fires when the peer disappears", fired.wait(5))
+    sock.stop()
 
 
 def test_concurrent_sends():
@@ -312,6 +341,8 @@ def test_teardown_cycles(rounds):
     check("the harness left no threads behind",
           threading.active_count() <= baseline,
           "baseline %d, now %d" % (baseline, threading.active_count()))
+    check("no peer refused to shut down", not _stuck_peers,
+          "stuck: %s" % _stuck_peers[:3])
     print("       (%.1fs)" % (time.time() - started))
 
 
