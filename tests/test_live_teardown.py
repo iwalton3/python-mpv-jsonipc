@@ -83,6 +83,37 @@ class TerminateWaitsTest(unittest.TestCase):
         with mock.patch("os.path.exists", return_value=True):
             process.stop()
 
+    def test_a_failed_start_does_not_leave_mpv_running(self):
+        # The failure path orphaned MPV exactly as the success path did, and
+        # worse: MPV.__init__ retries construction up to start_retries times,
+        # so a machine where MPV wedges without opening its pipe left five
+        # live processes, each holding the caller's stdout.
+        #
+        # The endpoint poll is answered False so the start "times out" while
+        # MPV is genuinely running, and sleep is a no-op so that costs
+        # microseconds instead of the real ten seconds.
+        spawned = []
+        real_popen = python_mpv_jsonipc.subprocess.Popen
+
+        def record(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        with mock.patch.object(python_mpv_jsonipc.subprocess, "Popen", record), \
+                mock.patch.object(python_mpv_jsonipc, "_ipc_endpoint_ready",
+                                  return_value=False), \
+                mock.patch.object(python_mpv_jsonipc.time, "sleep",
+                                  lambda seconds: None):
+            with self.assertRaises(python_mpv_jsonipc.MPVProcessError):
+                python_mpv_jsonipc.MPVProcess(
+                    "/tmp/mpv-failed-start-test", MPV_BINARY, **LIVE_OPTIONS)
+
+        self.assertEqual(len(spawned), 1)
+        self.assertIsNotNone(
+            spawned[0].returncode,
+            "a start that failed left MPV running and unreaped")
+
     def test_a_quit_callback_that_terminates_does_not_join_its_own_thread(self):
         # quit_callback runs on the reader thread, and terminate() defaults to
         # join=True -- so the reader was asked to join itself. RuntimeError

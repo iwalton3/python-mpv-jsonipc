@@ -94,6 +94,19 @@ def main():
                      time.time() - started), flush=True)
 
     elapsed = time.time() - started
+
+    # Settle before sampling, because terminate() does not actually promise
+    # the event handler has stopped. MPV.terminate() ends in
+    # EventHandler.stop(join), whose body is `self.join(join)` -- the *flag* is
+    # passed as Thread.join's *timeout*, so join=True means "wait up to one
+    # second" and never confirms the thread exited. On a loaded runner that
+    # second can expire legitimately, and sampling straight away would report
+    # a leak for a run in which nothing leaked. This leg is scheduled-only and
+    # not continue-on-error, so a false alarm here is one nobody can
+    # reproduce. Bounded, so a real leak still fails.
+    deadline = time.time() + 15
+    while threading.active_count() > baseline and time.time() < deadline:
+        time.sleep(0.1)
     leaked = threading.active_count() - baseline
     print("completed %d cycles in %.1fs (%.2fs each)"
           % (cycles, elapsed, elapsed / max(cycles, 1)), flush=True)

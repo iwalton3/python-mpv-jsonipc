@@ -579,11 +579,16 @@ class MPVProcess:
                 log.error("MPV failed with returncode {0}.".format(self.process.returncode))
                 break
         else:
-            self.process.terminate()
+            # stop(), not a bare terminate(): a failed start orphans MPV
+            # exactly like a failed teardown did, and MPV.__init__ retries
+            # this up to start_retries times -- so a machine where MPV wedges
+            # without opening its pipe used to leave five live processes,
+            # each still holding the caller's stdout.
+            self.stop()
             raise MPVProcessError("MPV start timed out.", argv=args)
 
         if not ipc_exists or self.process.returncode is not None:
-            self.process.terminate()
+            self.stop()
             # Message unchanged: it has been this string for years and is not
             # ours to break. What is new is the argv riding along, which is
             # what lets the caller ask MPV why.
