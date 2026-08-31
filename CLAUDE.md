@@ -66,6 +66,16 @@ A separate `EventHandler` thread serializes user callbacks (events, property obs
   buffer, and closes the handle it owns. Nothing is ever closed with I/O
   outstanding. Do not "simplify" this back to closing from `stop()`, and do
   not bound the join instead — that only hides the abort behind a timeout.
+  **Reproduced and verified, not merely argued.** On a Windows VM with Python
+  3.14 and real mpv, `tests/stress_teardown.py` aborted the *old* build on
+  both of two 3000-cycle runs, with the byte-identical signature and stack;
+  the ctypes build then ran 2 × 3000 cycles clean. So the rate is roughly one
+  abort per 2500–3000 full teardowns on that host, and the fix has evidence
+  behind it rather than only an ordering argument. **The loopback harness does
+  not reproduce it** — 20k cycles of the old build on the same 3.14 pass — so
+  the corruption needs the heap churn of a real `MPV` object graph to land on
+  something live. Reach for `stress_teardown.py`, not
+  `pipe_transport_check.py`, when testing this specific bug.
 
 - **The Windows transport is `ctypes` against `kernel32`** (`_transfer`,
   `_close`, `_ipc_endpoint_ready`), which replaced `_winapi` plus
@@ -141,13 +151,20 @@ Two more, neither collected by `discover` (which only takes `test*.py`):
   assertion. It also fails on leaked threads and an unreaped mpv, both of
   which were confirmed to fire by mutation.
 
-**Be exact about what these prove.** Under wine the first covers behaviour
-and the ctypes prototypes only — it says nothing about the memory corruption,
-because wine's named pipes are wine's own and the *old* PipeConnection code
-also survives 2000 cycles of it. On a real Windows runner both are hunting a
-fault that appeared roughly **once in 850 teardowns**, so they buy probability,
-not certainty. A green stress run is never "the corruption is gone"; it is
-only "no regression showed up in N tries". Say N.
+**Be exact about what each proves.** Under wine the first covers behaviour and
+the ctypes prototypes only — wine's named pipes are its own, and the old
+PipeConnection build survives 2000 cycles there. It does not reproduce the
+corruption on **real Windows** either: 20k cycles of the old build on 3.14
+pass. Only `stress_teardown.py`, with a real mpv, reproduces it — twice out of
+two 3000-cycle runs — which is what makes it the tool for this bug and the
+other one a behaviour check. Even so, a green stress run is never "the
+corruption is gone"; it is "no abort in N cycles". Say N.
+
+**A Windows VM is the fastest loop by a wide margin.** Two harness hangs that
+cost a 14-minute CI round trip each were diagnosed in seconds on real Windows,
+and the reproduction above is not reachable from CI at all at these cycle
+counts. Wine remains useful for the ctypes prototypes and for editing without
+Windows at hand; it is not a substitute for either.
 
 ### The golden API surface
 

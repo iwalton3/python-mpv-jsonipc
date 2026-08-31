@@ -51,9 +51,22 @@ if os.name == "nt":
     _ERROR_FILE_NOT_FOUND = 2
     _ERROR_PATH_NOT_FOUND = 3
     _ERROR_BROKEN_PIPE = 109
+    # Also "the other end is gone", and reached when the peer disconnects
+    # rather than exits. Without them a normal disconnect logs an ERROR and a
+    # traceback. Measured on real Windows, including against the old
+    # PipeConnection build, which logged it too -- it only raised EOFError for
+    # 109 -- so this is an improvement on the previous behaviour rather than a
+    # regression being repaired. Real MPV exiting gives 109, which is why no
+    # CI leg ever showed it.
+    _ERROR_NO_DATA = 232
+    _ERROR_PIPE_NOT_CONNECTED = 233
     _ERROR_MORE_DATA = 234
     _ERROR_OPERATION_ABORTED = 995
     _ERROR_IO_PENDING = 997
+
+    #: Every way the far end can be gone. All of them are a clean end of
+    #: stream, not an error to log.
+    _PEER_GONE = (_ERROR_BROKEN_PIPE, _ERROR_NO_DATA, _ERROR_PIPE_NOT_CONNECTED)
 
     class _OVERLAPPED(ctypes.Structure):
         _fields_ = [("Internal", ctypes.c_void_p),
@@ -275,7 +288,7 @@ class WindowsSocket(threading.Thread):
             return moved.value
 
         err = ctypes.get_last_error()
-        if err == _ERROR_BROKEN_PIPE:
+        if err in _PEER_GONE:
             return None
         if err != _ERROR_IO_PENDING:
             raise ctypes.WinError(err)
@@ -309,7 +322,7 @@ class WindowsSocket(threading.Thread):
             failure = 0 if completed else ctypes.get_last_error()
 
         if not completed:
-            if failure in (_ERROR_BROKEN_PIPE, _ERROR_OPERATION_ABORTED):
+            if failure in _PEER_GONE or failure == _ERROR_OPERATION_ABORTED:
                 return None
             if failure != _ERROR_MORE_DATA:
                 raise ctypes.WinError(failure)
