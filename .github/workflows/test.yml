@@ -187,11 +187,18 @@ jobs:
     # _PySemaphore_Wakeup` -- so the process exit status is the assertion and
     # repetition is the whole method.
     #
-    # **A green run here is not proof.** The observed rate was about 1 abort
-    # in 850 teardowns, so this leg buys probability, not certainty, and a
-    # single green run must never be read as "the corruption is gone". What it
-    # does buy is a detector with enough exposures to notice a regression
-    # before a user does, which the ~35 teardowns of a normal run cannot.
+    # **Only the real-mpv payload belongs here.** The loopback harness
+    # (tests/pipe_transport_check.py) used to run first and was dropped: 20k
+    # cycles of the *old*, vulnerable build pass on real Windows 3.14, so it
+    # cannot catch this bug however many cycles it is given. It needs the heap
+    # churn of a full MPV object graph to land on something live. The harness
+    # is still worth running by hand -- it checks the ctypes prototypes and
+    # the teardown behaviour, and it runs under wine -- but a CI leg that
+    # cannot fail for the reason it exists is worse than no leg.
+    #
+    # **A green run here is still not proof.** It buys probability: a detector
+    # with enough exposures to notice a regression before a user does, which
+    # the ~35 teardowns of a normal run cannot.
     #
     # Scheduled and manual only: it is slow, it cannot block a PR, and like
     # the prerelease leg it is deliberately NOT continue-on-error, because
@@ -199,9 +206,9 @@ jobs:
     # one.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    # Larger than its steps (15 + 25 + download), so a stall fails the step
-    # that caused it by name instead of reporting a cancelled job.
-    timeout-minutes: 60
+    # Larger than its steps (25 + download), so a stall fails the step that
+    # caused it by name instead of reporting a cancelled job.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -230,25 +237,6 @@ jobs:
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "mpv.exe not found after extraction" }
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Stress the transport teardown
-        # No mpv: a loopback named pipe stands in for it, so a cycle costs a
-        # pipe rather than a process start and the count can be large. This is
-        # where the volume comes from -- ~500 cycles/s locally.
-        shell: pwsh
-        timeout-minutes: 15
-        env:
-          # Just under the step timeout, so a genuine hang is reported by the
-          # harness -- naming the test it hung in -- rather than by GitHub
-          # killing the step with no output. That distinction already paid:
-          # the first real run hung in the harness itself, and the watchdog
-          # is what said where.
-          TRANSPORT_CHECK_TIMEOUT: '840'
-        # Sized from measurement, and deliberately modest: this harness does
-        # NOT reproduce the teardown corruption -- 20k cycles of the *old*
-        # PipeConnection build pass on real Windows 3.14 -- so extra cycles
-        # here buy nothing for that bug. It stays as a behaviour, leak and
-        # prototype check, and the mpv step below is the actual detector.
-        run: python tests/pipe_transport_check.py 5000
       - name: Stress the full teardown against real mpv
         # This is the detector. The whole `MPV.terminate()` path with the event
         # handler and process supervision in place -- the shape both real
