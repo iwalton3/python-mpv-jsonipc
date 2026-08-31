@@ -30,6 +30,8 @@ that the cheap tests here cover postconditions, not interleavings.
 """
 
 import os
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -80,6 +82,28 @@ class TerminateWaitsTest(unittest.TestCase):
 
         with mock.patch("os.path.exists", return_value=True):
             process.stop()
+
+    def test_a_quit_callback_that_terminates_does_not_join_its_own_thread(self):
+        # quit_callback runs on the reader thread, and terminate() defaults to
+        # join=True -- so the reader was asked to join itself. RuntimeError
+        # escaped run(), which skipped the internal terminate(join=False)
+        # after it and leaked the event handler.
+        mpv = start_mpv()
+        escaped = []
+        original_hook = threading.excepthook
+        threading.excepthook = lambda args: escaped.append(
+            "{0}: {1}".format(args.exc_type.__name__, args.exc_value))
+        self.addCleanup(setattr, threading, "excepthook", original_hook)
+
+        mpv.quit_callback = mpv.terminate
+        mpv.mpv_process.process.kill()
+
+        deadline = time.time() + 5
+        while mpv.mpv_inter.socket.is_alive() and time.time() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.2)
+
+        self.assertEqual(escaped, [])
 
     def test_the_process_is_reaped_not_merely_signalled(self):
         mpv = start_mpv()

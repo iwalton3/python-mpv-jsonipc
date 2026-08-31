@@ -63,6 +63,8 @@ _k32.ReadFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, w.LPDWORD,
                           ctypes.c_void_p]
 _k32.WriteFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, w.LPDWORD,
                            ctypes.c_void_p]
+_k32.DisconnectNamedPipe.argtypes = [w.HANDLE]
+_k32.DisconnectNamedPipe.restype = w.BOOL
 _k32.CloseHandle.argtypes = [w.HANDLE]
 
 
@@ -97,6 +99,14 @@ class Peer(threading.Thread):
                        None)
 
     def close(self):
+        # Disconnect, join, THEN close. Closing the handle while this peer's
+        # own thread is parked in a blocking ReadFile on it is precisely the
+        # pattern this harness exists to prove absent from the library -- and
+        # at 50k cycles on a real runner, a harness-side abort or stuck thread
+        # would be blamed on WindowsSocket, which is the one thing this must
+        # never do.
+        _k32.DisconnectNamedPipe(self.handle)
+        self.join(5)
         _k32.CloseHandle(self.handle)
 
 
@@ -264,8 +274,9 @@ def test_teardown_cycles(rounds):
     and hang check, not as evidence about the corruption.
     """
     started = time.time()
+    baseline = threading.active_count()
     for i in range(rounds):
-        peer, sock, inbox = connected("wine-cycle-%d-%d" % (os.getpid(), i))
+        peer, sock, inbox = connected("cycle-%d-%d" % (os.getpid(), i))
         peer.write({"event": "tick", "n": i})
         for _ in range(100):
             if inbox:
@@ -273,10 +284,14 @@ def test_teardown_cycles(rounds):
             time.sleep(0.001)
         sock.stop()
         peer.close()
-    check("%d construct/stop cycles with a read pending" % rounds, True,
-          "")
-    print("       (%.1fs, %d threads still live)"
-          % (time.time() - started, threading.active_count()))
+    check("%d construct/stop cycles with a read pending" % rounds, True, "")
+    # Asserted, not merely printed: a harness that leaks its own peer threads
+    # would otherwise quietly turn a long run into a thread-exhaustion failure
+    # and look like a library bug.
+    check("the harness left no threads behind",
+          threading.active_count() <= baseline,
+          "baseline %d, now %d" % (baseline, threading.active_count()))
+    print("       (%.1fs)" % (time.time() - started))
 
 
 def main():

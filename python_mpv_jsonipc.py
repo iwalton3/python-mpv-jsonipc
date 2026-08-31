@@ -49,6 +49,7 @@ if os.name == "nt":
     _INFINITE = 0xFFFFFFFF
     _WAIT_OBJECT_0 = 0
     _ERROR_FILE_NOT_FOUND = 2
+    _ERROR_PATH_NOT_FOUND = 3
     _ERROR_BROKEN_PIPE = 109
     _ERROR_MORE_DATA = 234
     _ERROR_OPERATION_ABORTED = 995
@@ -279,22 +280,39 @@ class WindowsSocket(threading.Thread):
         if err != _ERROR_IO_PENDING:
             raise ctypes.WinError(err)
 
-        handles = (_w.HANDLE * 2)(event, self._stop_event)
-        waitres = _kernel32.WaitForMultipleObjects(2, handles, False, _INFINITE)
-        if waitres == _WAIT_OBJECT_0 + 1:
-            # stop() wants us gone. Cancelling only *asks*; the wait below is
-            # what makes it safe.
+        # From here the kernel owns *buf* and *ov* until the operation
+        # actually finishes, so EVERY exit from this block -- including an
+        # exception -- has to go through the GetOverlappedResult below.
+        # Returning or raising without it destroys this frame, and its buffer,
+        # with a read still outstanding, which is the corruption this class
+        # exists to remove. CPython's own PipeConnection._recv_bytes uses this
+        # same except/finally shape for the same reason.
+        try:
+            handles = (_w.HANDLE * 2)(event, self._stop_event)
+            waitres = _kernel32.WaitForMultipleObjects(2, handles, False,
+                                                       _INFINITE)
+            if waitres != _WAIT_OBJECT_0:
+                # stop() wants us gone, or the wait itself failed. Either way
+                # we will not be consuming this operation.
+                _kernel32.CancelIoEx(self._pipe, ctypes.byref(ov))
+                if waitres != _WAIT_OBJECT_0 + 1:
+                    raise ctypes.WinError(ctypes.get_last_error())
+        except BaseException:
+            # BaseException, not Exception: a KeyboardInterrupt delivered at
+            # any bytecode boundary above must not escape with I/O pending.
             _kernel32.CancelIoEx(self._pipe, ctypes.byref(ov))
-        elif waitres != _WAIT_OBJECT_0:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise
+        finally:
+            # Cancelling only *asks*. This is the wait that makes it true.
+            completed = _kernel32.GetOverlappedResult(
+                self._pipe, ctypes.byref(ov), ctypes.byref(moved), True)
+            failure = 0 if completed else ctypes.get_last_error()
 
-        if not _kernel32.GetOverlappedResult(self._pipe, ctypes.byref(ov),
-                                             ctypes.byref(moved), True):
-            err = ctypes.get_last_error()
-            if err in (_ERROR_BROKEN_PIPE, _ERROR_OPERATION_ABORTED):
+        if not completed:
+            if failure in (_ERROR_BROKEN_PIPE, _ERROR_OPERATION_ABORTED):
                 return None
-            if err != _ERROR_MORE_DATA:
-                raise ctypes.WinError(err)
+            if failure != _ERROR_MORE_DATA:
+                raise ctypes.WinError(failure)
         return moved.value
 
     def _close(self):
@@ -326,7 +344,12 @@ class WindowsSocket(threading.Thread):
         with self._handle_lock:
             if self._stop_event:
                 _kernel32.SetEvent(self._stop_event)
-        if join and self.is_alive():
+        # `self is not current_thread()`, not is_alive(): is_alive() is True
+        # for the calling thread, so it never prevented the self-join it looks
+        # like it prevents. The reader reaches here whenever a user's
+        # quit_callback calls terminate(), and joining yourself is a
+        # RuntimeError that would escape run() and leak the event handler.
+        if join and self is not threading.current_thread():
             self.join()
         if not self.is_alive():
             # The reader has finished, or never ran. Either way nothing can
@@ -349,7 +372,14 @@ class WindowsSocket(threading.Thread):
         buf = ctypes.create_string_buffer(2048)
         data = b''
         try:
-            while True:
+            while not self._stopping:
+                # The stop event is only observed when a read *pends*, and a
+                # read that completes synchronously returns before ever
+                # reaching the wait. A peer with data always available could
+                # therefore keep stop() waiting in join(). Not reproducible --
+                # 124k messages of flooding still let the reader park -- but
+                # the flag costs nothing and closes the argument.
+                #
                 # Emphatically NOT under _io_lock: this read is parked
                 # whenever MPV has nothing to say, which is almost always, and
                 # holding the lock across it would block every send. The lock
@@ -418,7 +448,11 @@ class UnixSocket(threading.Thread):
                 self.socket = None
             except OSError:
                 pass # Ignore socket close failure.
-        if join:
+        # Not a bare `if join`: the reader thread reaches here whenever a
+        # user's quit_callback calls terminate(), and joining yourself raises
+        # RuntimeError -- which escaped run(), skipped the internal
+        # terminate(join=False) after it, and leaked the event handler.
+        if join and self is not threading.current_thread():
             self.join()
 
     def send(self, data):
@@ -466,7 +500,12 @@ def _ipc_endpoint_ready(ipc_socket):
         return os.path.exists(ipc_socket)
     if _kernel32.WaitNamedPipeW(ipc_socket, 0):
         return True
-    if ctypes.get_last_error() == _ERROR_FILE_NOT_FOUND:
+    # Both codes, because the old _winapi version raised FileNotFoundError and
+    # CPython maps ERROR_PATH_NOT_FOUND to ENOENT as well. Treating 3 as
+    # "present but busy" would report a successful start and then burn
+    # WindowsSocket's five CreateFileW retries before failing with the wrong
+    # exception for the caller's retry loop.
+    if ctypes.get_last_error() in (_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND):
         return False
     # Pipe exists but all instances are momentarily busy — it is present.
     return True
