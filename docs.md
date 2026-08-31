@@ -140,13 +140,14 @@ Manages an MPV process, ensuring the socket or pipe is available. (Internal)
 #### \_\_init\_\_
 
 ``` python
- | __init__(ipc_socket, mpv_location=None, ****kwargs)
+ | __init__(ipc_socket, mpv_location=None, discard_output=False, ****kwargs)
 ```
 
 Create and start the MPV process. Will block until socket/pipe is available.
 
 **ipc\_socket** is the path to the Unix/Linux socket or name of the Windows pipe.  
-**mpv\_location** is the path to mpv. If left unset it tries the one in the PATH.
+**mpv\_location** is the path to mpv. If left unset it tries the one in the PATH.  
+**discard\_output** sends MPV's stdout and stderr to devnull instead of inheriting the caller's. (Default: False)
 
 All other arguments are forwarded to MPV as command-line arguments.
 
@@ -155,10 +156,13 @@ All other arguments are forwarded to MPV as command-line arguments.
 #### stop
 
 ``` python
- | stop()
+ | stop(timeout=5)
 ```
 
-Terminate the process.
+Terminate the process, and do not return while it may still be alive.
+
+**timeout** is the seconds to wait for a polite exit before killing, and  
+again for the kill to land.
 
 <a name=".python_mpv_jsonipc.MPVInter"></a>
 
@@ -293,7 +297,7 @@ list is used. Not all commands may actually work when this fallback is used.
 #### \_\_init\_\_
 
 ``` python
- | __init__(start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, quit_callback=None, ****kwargs)
+ | __init__(start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, quit_callback=None, start_retries=5, start_retry_delay_ms=1000, diagnose_start_failures=True, discard_output=False, ****kwargs)
 ```
 
 Create the interface to MPV and process instance.
@@ -302,7 +306,16 @@ Create the interface to MPV and process instance.
 **ipc\_socket** is the path to the Unix/Linux socket or name of Windows pipe. (Default: Random Temp File)  
 **mpv\_location** is the location of MPV for **start\_mpv**. (Default: Use MPV in PATH)  
 **log\_handler(level, prefix, text)** is an optional handler for log events. (Default: Disabled)  
-**loglevel** is the level for log messages. Levels are fatal, error, warn, info, v, debug, trace. (Default: Disabled)
+**loglevel** is the level for log messages. Levels are fatal, error, warn, info, v, debug, trace. (Default: Disabled)  
+**quit\_callback** is called when the socket connection to MPV dies.  
+**diagnose\_start\_failures** re-runs MPV once, on the first failed start, to find out  
+why it refused to start. If MPV names an option it does not have, MPVProcessError is  
+raised immediately with **bad\_option** set instead of spending every retry on something  
+that cannot succeed. Set it to False for the pre-1.3 behaviour. (Default: True)  
+**discard\_output** sends MPV's stdout and stderr to devnull instead of letting it  
+inherit the caller's. Set it if anything waits for EOF on your stdout, since an  
+MPV that outlives **terminate** would otherwise hold that pipe open. Note this is  
+not MPV's own --quiet, which is still forwarded as an MPV option. (Default: False)
 
 All other arguments are forwarded to MPV as command-line arguments if **start\_mpv** is used.
 

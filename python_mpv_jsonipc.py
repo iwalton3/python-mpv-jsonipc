@@ -476,12 +476,14 @@ class MPVProcess:
     """
     Manages an MPV process, ensuring the socket or pipe is available. (Internal)
     """
-    def __init__(self, ipc_socket, mpv_location=None, **kwargs):
+    def __init__(self, ipc_socket, mpv_location=None, discard_output=False, **kwargs):
         """
         Create and start the MPV process. Will block until socket/pipe is available.
 
         *ipc_socket* is the path to the Unix/Linux socket or name of the Windows pipe.
         *mpv_location* is the path to mpv. If left unset it tries the one in the PATH.
+        *discard_output* sends MPV's stdout and stderr to devnull instead of inheriting
+        the caller's. (Default: False)
 
         All other arguments are forwarded to MPV as command-line arguments.
         """
@@ -518,7 +520,14 @@ class MPVProcess:
         args.extend("--{0}={1}".format(v[0].replace("_", "-"), self._mpv_fmt(v[1]))
                     for v in arg_pairs)
         self.argv = args
-        self.process = subprocess.Popen(args)
+        # close_fds only covers fds above 2, so MPV inherits our stdout and
+        # stderr. It never writes to them under --terminal=no, which is why
+        # this is invisible until something waits for EOF on the other end of
+        # that pipe: an MPV that outlives us holds it open and that reader
+        # blocks forever. Opt-in rather than default because callers who do
+        # want MPV's output on their terminal have had it for years.
+        stdio = subprocess.DEVNULL if discard_output else None
+        self.process = subprocess.Popen(args, stdout=stdio, stderr=stdio)
         ipc_exists = False
         for _ in range(100): # Give MPV 10 seconds to start.
             time.sleep(0.1)
@@ -559,11 +568,37 @@ class MPVProcess:
         else:
             return data
 
-    def stop(self):
-        """Terminate the process."""
+    def stop(self, timeout=5):
+        """Terminate the process, and do not return while it may still be alive.
+
+        *timeout* is the seconds to wait for a polite exit before killing, and
+        again for the kill to land.
+        """
+        # terminate() only *asks*. Returning here while MPV is still running
+        # left the caller no supported way to wait for it -- and a caller that
+        # exits at that moment orphans an MPV still holding its stdout. Both
+        # waits are bounded so a wedged MPV cannot hang teardown.
         self.process.terminate()
-        if os.name != 'nt' and os.path.exists(self.ipc_socket):
-            os.remove(self.ipc_socket)
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("MPV ignored terminate for {0}s; killing it.".format(timeout))
+            self.process.kill()
+            try:
+                self.process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                log.error("MPV survived kill; giving up on reaping it.")
+        if os.name != 'nt':
+            # try/except rather than exists()-then-remove, because two threads
+            # reach here: the caller's terminate(), and the reader's
+            # quit_callback -> terminate(join=False) when MPV's exit closes
+            # the socket. Waiting above made them *overlap by construction* --
+            # the wait ends when MPV dies, which is the same event that wakes
+            # the reader -- so the check-then-act window is reliably lost.
+            try:
+                os.remove(self.ipc_socket)
+            except OSError:
+                pass # Already gone, which is all we wanted.
 
 class MPVInter:
     """
@@ -690,7 +725,7 @@ class MPV:
     """
     def __init__(self, start_mpv=True, ipc_socket=None, mpv_location=None,
                  log_handler=None, loglevel=None, quit_callback=None, start_retries=5, start_retry_delay_ms=1000,
-                 diagnose_start_failures=True, **kwargs):
+                 diagnose_start_failures=True, discard_output=False, **kwargs):
         """
         Create the interface to MPV and process instance.
 
@@ -704,6 +739,10 @@ class MPV:
         why it refused to start. If MPV names an option it does not have, MPVProcessError is
         raised immediately with *bad_option* set instead of spending every retry on something
         that cannot succeed. Set it to False for the pre-1.3 behaviour. (Default: True)
+        *discard_output* sends MPV's stdout and stderr to devnull instead of letting it
+        inherit the caller's. Set it if anything waits for EOF on your stdout, since an
+        MPV that outlives *terminate* would otherwise hold that pipe open. Note this is
+        not MPV's own --quiet, which is still forwarded as an MPV option. (Default: False)
 
         All other arguments are forwarded to MPV as command-line arguments if *start_mpv* is used.
         """
@@ -730,7 +769,8 @@ class MPV:
             log_output = None
             for i in range(start_retries):
                 try:
-                    self.mpv_process = MPVProcess(ipc_socket, mpv_location, **kwargs)
+                    self.mpv_process = MPVProcess(ipc_socket, mpv_location,
+                                                  discard_output=discard_output, **kwargs)
                     break
                 except MPVError as error:
                     last_error = error

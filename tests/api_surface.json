@@ -16,7 +16,7 @@
         "object"
       ],
       "methods": {
-        "__init__": "(self, start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, quit_callback=None, start_retries=5, start_retry_delay_ms=1000, diagnose_start_failures=True, **kwargs)",
+        "__init__": "(self, start_mpv=True, ipc_socket=None, mpv_location=None, log_handler=None, loglevel=None, quit_callback=None, start_retries=5, start_retry_delay_ms=1000, diagnose_start_failures=True, discard_output=False, **kwargs)",
         "bind_event": "(self, name, callback)",
         "bind_key_press": "(self, name, callback)",
         "bind_property_observer": "(self, name, callback)",
@@ -55,8 +55,8 @@
         "object"
       ],
       "methods": {
-        "__init__": "(self, ipc_socket, mpv_location=None, **kwargs)",
-        "stop": "(self)"
+        "__init__": "(self, ipc_socket, mpv_location=None, discard_output=False, **kwargs)",
+        "stop": "(self, timeout=5)"
       }
     },
     "MPVProcessError": {

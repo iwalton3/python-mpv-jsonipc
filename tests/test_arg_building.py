@@ -107,6 +107,38 @@ class SocketPathTest(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
 
 
+class OutputRedirectionTest(unittest.TestCase):
+    """Which stdio ``Popen`` is asked for, which is not visible in the argv."""
+
+    def popen_call(self, **kwargs):
+        with mock.patch.object(python_mpv_jsonipc.subprocess, "Popen") as popen, \
+                mock.patch.object(python_mpv_jsonipc, "_ipc_endpoint_ready",
+                                  return_value=True):
+            popen.return_value = _FakeProcess()
+            python_mpv_jsonipc.MPVProcess("/tmp/testsocket", "mpv", **kwargs)
+            return popen.call_args
+
+    def test_by_default_mpv_inherits_our_stdout_and_stderr(self):
+        # Characterization: None means inherit. See test_live_teardown for
+        # what that costs and why it is still the default.
+        kwargs = self.popen_call()[1]
+        self.assertIsNone(kwargs["stdout"])
+        self.assertIsNone(kwargs["stderr"])
+
+    def test_discard_output_sends_both_to_devnull(self):
+        kwargs = self.popen_call(discard_output=True)[1]
+        self.assertEqual(kwargs["stdout"], python_mpv_jsonipc.subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], python_mpv_jsonipc.subprocess.DEVNULL)
+
+    def test_discard_output_is_never_forwarded_to_mpv(self):
+        # It is a keyword of ours, not an mpv option -- unlike `quiet`, which
+        # mpv really has and which must keep being forwarded. That collision
+        # is why this keyword is not named `quiet`.
+        argv = self.popen_call(discard_output=True, quiet=True)[0][0]
+        self.assertIn("--quiet=yes", argv)
+        self.assertEqual([a for a in argv if "discard" in a], [])
+
+
 class MpvFmtTest(unittest.TestCase):
     """`_mpv_fmt` in isolation, since it is where the bool/int trap lives."""
 

@@ -121,23 +121,33 @@ change them deliberately and say so in the commit.
 A new test's review question is *which field of the real object did I not
 model, and is that the field the test is named after?*
 
-There is a third, run by hand: **`tests/pipe_transport_check.py`** drives
-`WindowsSocket` against a loopback named pipe, so no mpv is started and a
-cycle costs a pipe rather than a process. It is not collected by `discover`
-(which only takes `test*.py`) and runs on any Windows interpreter — including
-one under wine, which is how the transport can be *run* while being edited
-from a Linux machine instead of first executing in CI. The embeddable zip in
-a `WINEARCH=win64` prefix is enough; no installer, no mpv. (The default
-`~/.wine` here is win32 and refuses a 64-bit `python.exe` with a misleading
-"wine32 is missing" — make a fresh prefix, don't chase that message.) It
-earned its place immediately by catching a fatal `_handle` collision that
-review had not.
+Two more, neither collected by `discover` (which only takes `test*.py`):
 
-**Be exact about what it proves.** Under wine it covers behaviour and the
-ctypes prototypes only — it says nothing about the memory corruption, because
-wine's named pipes are wine's own and the *old* PipeConnection code also
-survives 2000 cycles of it. A green wine run is never permission to skip the
-Windows CI leg.
+* **`tests/pipe_transport_check.py`** drives `WindowsSocket` against a
+  loopback named pipe, so no mpv is started and a cycle costs a pipe rather
+  than a process. It runs on any Windows interpreter — including one under
+  wine, which is how the transport can be *run* while being edited from a
+  Linux machine instead of first executing in CI. The embeddable zip in a
+  `WINEARCH=win64` prefix is enough; no installer, no mpv. (The default
+  `~/.wine` here is win32 and refuses a 64-bit `python.exe` with a misleading
+  "wine32 is missing" — make a fresh prefix, don't chase that message.) It
+  earned its place immediately by catching a fatal `_handle` collision that
+  review had not.
+* **`tests/stress_teardown.py`** repeats the full `MPV.terminate()` path
+  against a real mpv, with the event handler and process supervision in
+  place — the shape both real aborts arrived in, and the one a loopback pipe
+  cannot model. It asserts almost nothing on purpose: the failure it hunts
+  aborts the interpreter rather than raising, so the exit status is the
+  assertion. It also fails on leaked threads and an unreaped mpv, both of
+  which were confirmed to fire by mutation.
+
+**Be exact about what these prove.** Under wine the first covers behaviour
+and the ctypes prototypes only — it says nothing about the memory corruption,
+because wine's named pipes are wine's own and the *old* PipeConnection code
+also survives 2000 cycles of it. On a real Windows runner both are hunting a
+fault that appeared roughly **once in 850 teardowns**, so they buy probability,
+not certainty. A green stress run is never "the corruption is gone"; it is
+only "no regression showed up in N tries". Say N.
 
 ### The golden API surface
 
@@ -218,6 +228,24 @@ than rediscovered:
   wrong on Windows, and the Windows path also costs five seconds before it
   says so. Pinned per platform in `test_live_failure.py` rather than widened
   to `Exception`, because the divergence is the point.
+* **mpv inherits the caller's stdout and stderr**, confirmed by reading
+  `/proc/<mpv>/fd/1` back and finding the parent's own pipe inode.
+  `close_fds` only covers fds above 2. It is invisible under `--terminal=no`
+  because mpv never writes there — it costs nothing until something waits for
+  **EOF** on that pipe, and then an mpv outliving `terminate()` hangs it
+  forever. That is still the **default**, because callers have had mpv's
+  output on their terminal for years; `discard_output=True` opts out.
+* **The opt-out could not be called `quiet`.** mpv really has `--quiet`, and
+  `**kwargs` forwards it, so taking that name would have silently stopped
+  passing an option callers already use. Checked against `mpv --list-options`
+  rather than assumed. Any future keyword of ours needs the same check.
+* **`terminate()` used to return with mpv still running**, because `stop()`
+  sent SIGTERM and never waited. Locally the window is under a millisecond
+  with `--vo=null`, which is exactly why the orphan was intermittent in the
+  wild rather than absent; real AV teardown is far slower. `stop()` now waits
+  and escalates to `kill()`. The deterministic assertion is
+  `process.returncode is not None` — `terminate()` alone never sets it, so
+  that catches a regression without racing.
 
 ### CI
 
