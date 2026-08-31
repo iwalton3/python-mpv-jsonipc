@@ -306,10 +306,14 @@ class WindowsSocket(threading.Thread):
                                                        _INFINITE)
             if waitres != _WAIT_OBJECT_0:
                 # stop() wants us gone, or the wait itself failed. Either way
-                # we will not be consuming this operation.
+                # we will not be consuming this operation. Read the wait's
+                # error *first*: CancelIoEx overwrites the thread's last error,
+                # so reading it afterwards reports the cancel's success and
+                # loses the real cause on the path hardest to reproduce.
+                waitfail = ctypes.get_last_error()
                 _kernel32.CancelIoEx(self._pipe, ctypes.byref(ov))
                 if waitres != _WAIT_OBJECT_0 + 1:
-                    raise ctypes.WinError(ctypes.get_last_error())
+                    raise ctypes.WinError(waitfail)
         except BaseException:
             # BaseException, not Exception: a KeyboardInterrupt delivered at
             # any bytecode boundary above must not escape with I/O pending.
@@ -454,11 +458,17 @@ class UnixSocket(threading.Thread):
     def stop(self, join=True):
         """Terminate the thread."""
         self._stopping = True
-        if self.socket is not None:
+        # Bind once. Two threads reach here -- the caller's terminate() and
+        # the reader's quit_callback -> terminate(join=False) -- and making
+        # stop() wait for MPV widened that overlap, because the wait ends on
+        # the same MPV exit that wakes the reader. Re-reading self.socket
+        # after the None check let the loser call shutdown/close on None,
+        # which is an AttributeError and so is *not* caught below.
+        sock, self.socket = self.socket, None
+        if sock is not None:
             try:
-                self.socket.shutdown(socket.SHUT_WR)
-                self.socket.close()
-                self.socket = None
+                sock.shutdown(socket.SHUT_WR)
+                sock.close()
             except OSError:
                 pass # Ignore socket close failure.
         # Not a bare `if join`: the reader thread reaches here whenever a
@@ -470,16 +480,18 @@ class UnixSocket(threading.Thread):
 
     def send(self, data):
         """Send *data* to the socket, encoded as JSON."""
-        if self.socket is None:
+        sock = self.socket # bind once; see stop()
+        if sock is None:
             raise BrokenPipeError("socket is closed")
-        self.socket.send(json.dumps(data).encode('utf-8') + b'\n')
+        sock.send(json.dumps(data).encode('utf-8') + b'\n')
 
     def run(self):
         """Process socket events. Do not run this directly. Use *start*."""
         data = b''
+        sock = self.socket # bind once; see stop()
         try:
             while True:
-                current_data = self.socket.recv(1024)
+                current_data = sock.recv(1024)
                 if current_data == b'':
                     break
 
@@ -597,11 +609,11 @@ class MPVProcess:
             # this up to start_retries times -- so a machine where MPV wedges
             # without opening its pipe used to leave five live processes,
             # each still holding the caller's stdout.
-            self.stop()
+            self._stop_quietly()
             raise MPVProcessError("MPV start timed out.", argv=args)
 
         if not ipc_exists or self.process.returncode is not None:
-            self.stop()
+            self._stop_quietly()
             # Message unchanged: it has been this string for years and is not
             # ours to break. What is new is the argv riding along, which is
             # what lets the caller ask MPV why.
@@ -624,6 +636,20 @@ class MPVProcess:
             return "no"
         else:
             return data
+
+    def _stop_quietly(self):
+        """stop(), for the paths that are already raising something better.
+
+        A failed unlink here would replace MPVProcessError -- and an OSError
+        escapes MPV.__init__'s ``except MPVError`` retry loop, so the caller
+        would lose both the retries and the argv and returncode that the
+        error carries.
+        """
+        try:
+            self.stop()
+        except OSError:
+            log.debug("Cleanup after a failed MPV start did not complete.",
+                      exc_info=1)
 
     def stop(self, timeout=5):
         """Terminate the process, and do not return while it may still be alive.
@@ -1059,11 +1085,14 @@ class MPV:
     def terminate(self, join=True):
         """Terminate the connection to MPV and process (if *start_mpv* is used)."""
         if self.mpv_process:
-            # Unconditionally, regardless of *join*: that flag governs whether
-            # we join our *threads*, and _quit_callback passes False only
-            # because a thread cannot join itself. Letting it skip the wait
-            # would hand back the orphaned-MPV bug to anyone who passes it,
-            # and a terminate() that does not terminate is the worse failure.
+            # Unconditionally, regardless of *join*. That flag only ever
+            # reaches our own threads -- and imperfectly: the transports join
+            # properly, while EventHandler.stop passes it as Thread.join's
+            # *timeout*, so join=True waits at most a second there and does
+            # not confirm the thread exited. Either way it says nothing about
+            # MPV, and _quit_callback passes False only because a thread
+            # cannot join itself. Letting it skip this wait would hand the
+            # orphaned-MPV bug back to anyone who passed it.
             self.mpv_process.stop()
         if self.mpv_inter:
             self.mpv_inter.stop(join)

@@ -44,6 +44,17 @@ has_proc = unittest.skipUnless(os.path.exists("/proc/self/fd"),
                                "needs /proc to see the child's fds")
 
 
+def _skip_only_the_readiness_poll():
+    """Make MPVProcess's 0.1s poll free without touching any other sleep.
+
+    Patching ``time.sleep`` wholesale would also hit ``Popen.wait(timeout=)``,
+    which stop() calls from inside the same patched block -- turning a bounded
+    wait into a busy spin, and spinning every other sleeping thread with it.
+    """
+    real_sleep = python_mpv_jsonipc.time.sleep
+    return lambda seconds: None if seconds == 0.1 else real_sleep(seconds)
+
+
 def start_mpv(**extra):
     options = dict(LIVE_OPTIONS)
     options.update(extra)
@@ -84,6 +95,35 @@ class TerminateWaitsTest(unittest.TestCase):
         with mock.patch("os.path.exists", return_value=True):
             process.stop()
 
+    @unittest.skipIf(os.name == "nt", "UnixSocket only")
+    def test_stopping_the_socket_survives_the_other_thread_finishing_first(self):
+        # Two threads reach UnixSocket.stop(): the caller's terminate() and
+        # the reader's quit_callback -> terminate(join=False). Making stop()
+        # wait for MPV widened that overlap, because the wait ends on the same
+        # MPV exit that wakes the reader.
+        #
+        # Racing it is unreliable -- 400 live cycles produced none -- so model
+        # the losing thread instead: the winner clears self.socket midway
+        # through ours. Re-reading the attribute then calls close() on None,
+        # an AttributeError, which `except OSError` does not catch.
+        class Winner:
+            def __init__(self, real, owner):
+                self._real, self._owner = real, owner
+
+            def shutdown(self, how):
+                self._owner.socket = None   # the other thread finishes here
+                return self._real.shutdown(how)
+
+            def close(self):
+                return self._real.close()
+
+        mpv = start_mpv()
+        self.addCleanup(mpv.terminate)
+        transport = mpv.mpv_inter.socket
+        transport.socket = Winner(transport.socket, transport)
+
+        transport.stop(join=False)
+
     def test_a_failed_start_does_not_leave_mpv_running(self):
         # The failure path orphaned MPV exactly as the success path did, and
         # worse: MPV.__init__ retries construction up to start_retries times,
@@ -105,10 +145,11 @@ class TerminateWaitsTest(unittest.TestCase):
                 mock.patch.object(python_mpv_jsonipc, "_ipc_endpoint_ready",
                                   return_value=False), \
                 mock.patch.object(python_mpv_jsonipc.time, "sleep",
-                                  lambda seconds: None):
+                                  _skip_only_the_readiness_poll()):
             with self.assertRaises(python_mpv_jsonipc.MPVProcessError):
                 python_mpv_jsonipc.MPVProcess(
-                    "/tmp/mpv-failed-start-test", MPV_BINARY, **LIVE_OPTIONS)
+                    os.path.join(tempfile.mkdtemp(), "failed-start.sock"),
+                    MPV_BINARY, **LIVE_OPTIONS)
 
         self.assertEqual(len(spawned), 1)
         self.assertIsNotNone(

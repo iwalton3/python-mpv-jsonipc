@@ -40,19 +40,31 @@ import time
 from _harness import LIVE_OPTIONS, MPV_BINARY, python_mpv_jsonipc
 
 
-def watchdog(seconds):
-    """Fail loudly on a hang rather than waiting for the CI step to be killed.
+#: Bumped once per completed cycle, and read by the watchdog.
+_progress = [0]
 
-    A deadlocked teardown is a plausible regression here, and a job killed by
-    its own timeout reports no cycle count and no last-known state -- so say
-    both and exit hard, since the threads holding it will never be joinable.
+
+def watchdog(seconds):
+    """Fail loudly on a *stall*, not on a slow machine.
+
+    Deliberately a no-progress timer rather than a total-elapsed one. Elapsed
+    time would have to be retuned every time the cycle count moves, and worse,
+    a runner that is merely slow would be reported as a deadlock -- on a
+    scheduled leg that is not continue-on-error and therefore notifies. This
+    fires only if no cycle at all completes for *seconds*, so the count and
+    the timeout are independent, and it names the cycle it stalled on because
+    a job killed by its own timeout reports nothing at all.
     """
     def bark():
-        time.sleep(seconds)
-        sys.stderr.write(
-            "\nFAILED: no progress for %ds; teardown is stuck.\n" % seconds)
-        sys.stderr.flush()
-        os._exit(2)
+        while True:
+            seen = _progress[0]
+            time.sleep(seconds)
+            if _progress[0] == seen:
+                sys.stderr.write(
+                    "\nFAILED: no cycle completed in %ds; stuck at cycle %d.\n"
+                    % (seconds, seen))
+                sys.stderr.flush()
+                os._exit(2)
 
     thread = threading.Thread(target=bark)
     thread.daemon = True
@@ -66,9 +78,10 @@ def main():
 
     cycles = int(sys.argv[1] if len(sys.argv) > 1
                  else os.environ.get("STRESS_CYCLES", "200"))
-    # Generous: mpv start dominates, and a slow runner is not a failure. The
-    # watchdog is here for a wedged teardown, not for a slow one.
-    watchdog(int(os.environ.get("STRESS_TIMEOUT", "1800")))
+    # Seconds without a single completed cycle, not a total budget -- a cycle
+    # costs ~0.1s, so this is enormous slack for a slow runner and still
+    # catches a genuine wedge quickly.
+    watchdog(int(os.environ.get("STRESS_TIMEOUT", "300")))
 
     baseline = threading.active_count()
     print("mpv: %s" % MPV_BINARY, flush=True)
@@ -88,6 +101,7 @@ def main():
                 "\nFAILED: cycle %d left mpv unreaped.\n" % i)
             return 1
 
+        _progress[0] = i + 1
         if i and i % 50 == 0:
             print("  %d/%d cycles, %d threads live, %.1fs"
                   % (i, cycles, threading.active_count(),

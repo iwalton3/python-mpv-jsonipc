@@ -105,7 +105,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    # Larger than its steps (10 + 5 + download), per the rule above.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +140,19 @@ jobs:
         shell: pwsh
         timeout-minutes: 10
         run: python -m unittest discover tests -v
+      - name: Check the pipe transport
+        # Not a stress run -- 300 cycles, a couple of seconds. It was dropped
+        # from windows-stress because it cannot reproduce the teardown
+        # corruption at any cycle count, but it is the only thing anywhere
+        # that checks the ctypes prototypes against the real kernel32, and it
+        # already caught a fatal one: Thread owning `self._handle` from 3.13.
+        # That is precisely the break-along-the-Python-axis this wide matrix
+        # exists for, and the unittest suite cannot see it.
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          TRANSPORT_CHECK_TIMEOUT: '120'
+        run: python tests/pipe_transport_check.py 300
 
   windows-python-prerelease:
     # The early-warning leg, and deliberately NOT continue-on-error.
@@ -252,7 +266,10 @@ jobs:
         shell: pwsh
         timeout-minutes: 25
         env:
-          STRESS_TIMEOUT: '1080'
+          # Seconds with NO cycle completing, not a total budget: the cycle
+          # count and this value are now independent, so a slow runner is
+          # never mistaken for a wedged teardown.
+          STRESS_TIMEOUT: '300'
         run: python tests/stress_teardown.py 6000
 
   windows-frozen:
