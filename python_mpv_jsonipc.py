@@ -12,8 +12,86 @@ import logging
 log = logging.getLogger('mpv-jsonipc')
 
 if os.name == "nt":
-    import _winapi
-    from multiprocessing.connection import PipeConnection
+    import ctypes
+    import ctypes.wintypes as _w
+
+    # The Windows transport calls kernel32 directly rather than going through
+    # ``_winapi`` and ``multiprocessing.connection.PipeConnection``. The second
+    # of those is a live bug, not tidiness:
+    #
+    #   PipeConnection says outright that "a connection should only be used by
+    #   a single thread", and this library used it from two -- a reader parked
+    #   in recv_bytes, and whoever called stop(). Its _close() cancels a
+    #   pending *send* before closing the handle, but has no equivalent for a
+    #   pending *read*, because _recv_bytes never stores its OVERLAPPED
+    #   anywhere reachable. So stop() closed the handle with an overlapped
+    #   read outstanding and a kernel-owned buffer still live, which is
+    #   undefined: the kernel may complete the I/O into memory Python is
+    #   tearing down. CPython 3.13+ allocates its thread primitives from the
+    #   parking lot, so that corruption now lands as an abort --
+    #   ``Fatal Python error: _PySemaphore_Wakeup: ReleaseSemaphore failed
+    #   (error: 6)`` -- seen in CI on both 3.13 and 3.14.
+    #
+    # Neither ``_winapi`` (private C extension) nor ``PipeConnection`` (absent
+    # from __all__, defined conditionally, an implementation detail of Pipe())
+    # carries a compatibility contract, so this also removes a dependency that
+    # breaks along the *Python* axis rather than ours. ctypes is stdlib and
+    # needs no PyInstaller hooks or bundled DLLs, which is the property the
+    # original _winapi choice was buying and that downstream projects such as
+    # SyncPlay and jellyfin-mpv-shim adopted this library for.
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
+    _OPEN_EXISTING = 3
+    _FILE_FLAG_OVERLAPPED = 0x40000000
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    _INFINITE = 0xFFFFFFFF
+    _WAIT_OBJECT_0 = 0
+    _ERROR_FILE_NOT_FOUND = 2
+    _ERROR_BROKEN_PIPE = 109
+    _ERROR_MORE_DATA = 234
+    _ERROR_OPERATION_ABORTED = 995
+    _ERROR_IO_PENDING = 997
+
+    class _OVERLAPPED(ctypes.Structure):
+        _fields_ = [("Internal", ctypes.c_void_p),
+                    ("InternalHigh", ctypes.c_void_p),
+                    ("Offset", _w.DWORD),
+                    ("OffsetHigh", _w.DWORD),
+                    ("hEvent", _w.HANDLE)]
+
+    # Declared explicitly: without argtypes ctypes truncates pointers to int
+    # on 64-bit, which fails in ways that look like random handle errors.
+    _kernel32.CreateFileW.argtypes = [_w.LPCWSTR, _w.DWORD, _w.DWORD,
+                                      ctypes.c_void_p, _w.DWORD, _w.DWORD,
+                                      _w.HANDLE]
+    _kernel32.CreateFileW.restype = _w.HANDLE
+    _kernel32.CreateEventW.argtypes = [ctypes.c_void_p, _w.BOOL, _w.BOOL,
+                                       _w.LPCWSTR]
+    _kernel32.CreateEventW.restype = _w.HANDLE
+    _kernel32.SetEvent.argtypes = [_w.HANDLE]
+    _kernel32.SetEvent.restype = _w.BOOL
+    _kernel32.ResetEvent.argtypes = [_w.HANDLE]
+    _kernel32.ResetEvent.restype = _w.BOOL
+    _kernel32.ReadFile.argtypes = [_w.HANDLE, ctypes.c_void_p, _w.DWORD,
+                                   _w.LPDWORD, ctypes.c_void_p]
+    _kernel32.ReadFile.restype = _w.BOOL
+    _kernel32.WriteFile.argtypes = [_w.HANDLE, ctypes.c_void_p, _w.DWORD,
+                                    _w.LPDWORD, ctypes.c_void_p]
+    _kernel32.WriteFile.restype = _w.BOOL
+    _kernel32.GetOverlappedResult.argtypes = [_w.HANDLE, ctypes.c_void_p,
+                                              _w.LPDWORD, _w.BOOL]
+    _kernel32.GetOverlappedResult.restype = _w.BOOL
+    _kernel32.CancelIoEx.argtypes = [_w.HANDLE, ctypes.c_void_p]
+    _kernel32.CancelIoEx.restype = _w.BOOL
+    _kernel32.WaitForMultipleObjects.argtypes = [_w.DWORD, ctypes.c_void_p,
+                                                 _w.BOOL, _w.DWORD]
+    _kernel32.WaitForMultipleObjects.restype = _w.DWORD
+    _kernel32.CloseHandle.argtypes = [_w.HANDLE]
+    _kernel32.CloseHandle.restype = _w.BOOL
+    _kernel32.WaitNamedPipeW.argtypes = [_w.LPCWSTR, _w.DWORD]
+    _kernel32.WaitNamedPipeW.restype = _w.BOOL
 
 TIMEOUT = 120
 
@@ -123,62 +201,167 @@ class WindowsSocket(threading.Thread):
         *callback(json_data)* is the function for recieving events.
         *quit_callback* is called when the socket connection dies.
         """
+        # First, so Thread's own attributes are in place before ours rather
+        # than landing on top of them. Thread grew a `self._handle` of its own
+        # in 3.13, so the pipe handle is `_pipe`: named `_handle` and assigned
+        # before this call, Thread silently replaced it with a
+        # _thread._ThreadHandle and every read died in ctypes argument
+        # conversion. Anything added below needs a name Thread does not use.
+        threading.Thread.__init__(self)
+        self.daemon = True
+
         ipc_socket = "\\\\.\\pipe\\" + ipc_socket
         self.callback = callback
         self.quit_callback = quit_callback
         self._stopping = False
+        self._closed = False
+        # Every send is held under this lock, so holding it is proof that no
+        # write is in flight and the pipe is safe to close. The reader is the
+        # exception and must stay one -- see run().
+        self._io_lock = threading.RLock()
+        # Guards the handle *values* against being used after _close cleared
+        # them. Held only for the moment it takes to signal or close, never
+        # across a wait.
+        self._handle_lock = threading.RLock()
 
-        access = _winapi.GENERIC_READ | _winapi.GENERIC_WRITE
+        access = _GENERIC_READ | _GENERIC_WRITE
         limit = 5 # Connection may fail at first. Try 5 times.
         for _ in range(limit):
-            try:
-                pipe_handle = _winapi.CreateFile(
-                    ipc_socket, access, 0, _winapi.NULL, _winapi.OPEN_EXISTING,
-                    _winapi.FILE_FLAG_OVERLAPPED, _winapi.NULL
-                    )
+            # Still five attempts, and still load-bearing: _ipc_endpoint_ready
+            # does not run on the start_mpv=False attach path, and it answers
+            # True for a pipe whose instances are all busy, which CreateFile
+            # then refuses with ERROR_PIPE_BUSY.
+            handle = _kernel32.CreateFileW(
+                ipc_socket, access, 0, None, _OPEN_EXISTING,
+                _FILE_FLAG_OVERLAPPED, None)
+            if handle != _INVALID_HANDLE_VALUE:
                 break
-            except OSError:
-                time.sleep(1)
+            time.sleep(1)
         else:
+            # Deliberately not an OSError: downstream and the failure tests
+            # both pin that this is what the Windows attach path raises.
             raise MPVError("Cannot connect to pipe.")
-        self.socket = PipeConnection(pipe_handle)
+        self._pipe = handle
+
+        # Manual-reset, so a stop stays visible to the reader and to any send
+        # waiting alongside it rather than waking exactly one of them.
+        self._stop_event = _kernel32.CreateEventW(None, True, False, None)
+        self._read_event = _kernel32.CreateEventW(None, True, False, None)
+        self._write_event = _kernel32.CreateEventW(None, True, False, None)
+        if not all((self._stop_event, self._read_event, self._write_event)):
+            self._close()
+            raise MPVError("Cannot create pipe events.")
 
         if self.callback is None:
             self.callback = lambda data: None
 
-        threading.Thread.__init__(self)
-        self.daemon = True
+    def _transfer(self, func, event, buf, size):
+        """Run one overlapped operation, waiting for it or for *stop*.
+
+        Returns the bytes transferred, or None if the pipe ended or *stop* cut
+        the operation short.
+
+        The GetOverlappedResult(wait=True) below is the point of this whole
+        class. It does not return until the kernel has finished with *buf* and
+        the OVERLAPPED -- including when we cancelled it -- so neither is ever
+        released while an I/O could still write into it.
+        """
+        ov = _OVERLAPPED()
+        ov.hEvent = event
+        _kernel32.ResetEvent(event)
+        moved = _w.DWORD(0)
+        if func(self._pipe, buf, size, ctypes.byref(moved), ctypes.byref(ov)):
+            return moved.value
+
+        err = ctypes.get_last_error()
+        if err == _ERROR_BROKEN_PIPE:
+            return None
+        if err != _ERROR_IO_PENDING:
+            raise ctypes.WinError(err)
+
+        handles = (_w.HANDLE * 2)(event, self._stop_event)
+        waitres = _kernel32.WaitForMultipleObjects(2, handles, False, _INFINITE)
+        if waitres == _WAIT_OBJECT_0 + 1:
+            # stop() wants us gone. Cancelling only *asks*; the wait below is
+            # what makes it safe.
+            _kernel32.CancelIoEx(self._pipe, ctypes.byref(ov))
+        elif waitres != _WAIT_OBJECT_0:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        if not _kernel32.GetOverlappedResult(self._pipe, ctypes.byref(ov),
+                                             ctypes.byref(moved), True):
+            err = ctypes.get_last_error()
+            if err in (_ERROR_BROKEN_PIPE, _ERROR_OPERATION_ABORTED):
+                return None
+            if err != _ERROR_MORE_DATA:
+                raise ctypes.WinError(err)
+        return moved.value
+
+    def _close(self):
+        """Close the handles, once, with no I/O outstanding."""
+        # _io_lock first: holding it means no send is mid-write. _handle_lock
+        # second, to exclude a concurrent stop() signalling an event we are
+        # about to close. Nothing ever takes these in the other order, and
+        # _handle_lock is never held across a wait, so stop() cannot block.
+        with self._io_lock, self._handle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            for name in ("_pipe", "_stop_event", "_read_event",
+                         "_write_event"):
+                handle = getattr(self, name, None)
+                if handle:
+                    _kernel32.CloseHandle(handle)
+                # Cleared, not just closed: terminate() is routinely called
+                # twice, and a closed handle value can be reused by the OS.
+                setattr(self, name, None)
 
     def stop(self, join=True):
         """Terminate the thread."""
         self._stopping = True
-        if self.socket is not None:
-            try:
-                self.socket.close()
-            except OSError:
-                pass # Ignore socket close failure.
-        if join:
+        # Deliberately does NOT close the handle. Closing it from here with
+        # the reader's overlapped read still pending is the corruption this
+        # class was rewritten to remove; instead we wake the reader and let it
+        # close the handle it owns, once its read has provably finished.
+        with self._handle_lock:
+            if self._stop_event:
+                _kernel32.SetEvent(self._stop_event)
+        if join and self.is_alive():
             self.join()
+        if not self.is_alive():
+            # The reader has finished, or never ran. Either way nothing can
+            # have I/O outstanding, so the handle is ours to close.
+            self._close()
 
     def send(self, data):
         """Send *data* to the pipe, encoded as JSON."""
-        try:
-            self.socket.send_bytes(json.dumps(data).encode('utf-8') + b'\n')
-        except OSError as ex:
-            if len(ex.args) == 1 and ex.args[0] == "handle is closed":
+        blob = json.dumps(data).encode('utf-8') + b'\n'
+        with self._io_lock:
+            if self._closed:
                 raise BrokenPipeError("handle is closed")
-            raise ex
+            written = self._transfer(_kernel32.WriteFile, self._write_event,
+                                     blob, len(blob))
+        if written is None:
+            raise BrokenPipeError("handle is closed")
 
     def run(self):
         """Process pipe events. Do not run this directly. Use *start*."""
+        buf = ctypes.create_string_buffer(2048)
         data = b''
         try:
             while True:
-                current_data = self.socket.recv_bytes(2048)
-                if current_data == b'':
+                # Emphatically NOT under _io_lock: this read is parked
+                # whenever MPV has nothing to say, which is almost always, and
+                # holding the lock across it would block every send. The lock
+                # exists to keep a send and the close apart; the reader needs
+                # no such guard because it closes the handle itself, in the
+                # finally below, only once its own read has returned.
+                nread = self._transfer(_kernel32.ReadFile, self._read_event,
+                                       buf, len(buf))
+                if not nread:
                     break
 
-                data += current_data
+                data += buf.raw[:nread]
                 if data[-1] != 10:
                     continue
 
@@ -189,15 +372,14 @@ class WindowsSocket(threading.Thread):
                     json_data = json.loads(item)
                     self.callback(json_data)
                 data = b''
-        except EOFError:
-            if self.quit_callback:
-                self.quit_callback()
-        except Exception as ex:
+        except Exception:
             # Only log if not intentionally stopping
             if not self._stopping:
                 log.error("Pipe connection died.", exc_info=1)
-            if self.quit_callback:
-                self.quit_callback()
+        finally:
+            self._close()
+        if self.quit_callback:
+            self.quit_callback()
 
 class UnixSocket(threading.Thread):
     """
@@ -282,14 +464,12 @@ def _ipc_endpoint_ready(ipc_socket):
     """
     if os.name != 'nt':
         return os.path.exists(ipc_socket)
-    try:
-        _winapi.WaitNamedPipe(ipc_socket, 0)
+    if _kernel32.WaitNamedPipeW(ipc_socket, 0):
         return True
-    except FileNotFoundError:
+    if ctypes.get_last_error() == _ERROR_FILE_NOT_FOUND:
         return False
-    except OSError:
-        # Pipe exists but all instances are momentarily busy — it is present.
-        return True
+    # Pipe exists but all instances are momentarily busy — it is present.
+    return True
 
 
 class MPVProcess:

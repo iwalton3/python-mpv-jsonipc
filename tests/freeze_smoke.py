@@ -3,9 +3,10 @@
 Not part of the unittest suite -- it is the payload for the `windows-frozen`
 CI job. What it proves is narrow and not covered anywhere else: that the
 Windows named-pipe transport still works when the interpreter is frozen. That
-path reaches `_winapi` and `multiprocessing.connection.PipeConnection`, and a
-freezer that fails to bundle either produces a binary that imports fine and
-dies the moment it opens a pipe.
+path is now `ctypes` against `kernel32`, which is what the transport was
+rewritten onto precisely because it survives freezing without hooks or
+bundled DLLs -- but "no hook needed" is a claim about PyInstaller, not a
+guarantee, and only a frozen binary opening a real pipe can check it.
 
 Exits non-zero with a message on any failure, so the CI step is the assertion.
 """

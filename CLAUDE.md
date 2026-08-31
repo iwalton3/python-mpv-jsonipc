@@ -44,28 +44,47 @@ A separate `EventHandler` thread serializes user callbacks (events, property obs
   own comment — and `CreateFile` against a busy pipe fails with
   `ERROR_PIPE_BUSY`, an `OSError`. The retry is what turns that race into a
   connection a moment later rather than a hard failure. Keep it.
-- **OBSERVED 2026-08-18: the Windows transport can abort the interpreter on
-  Python 3.14.** `Fatal Python error: _PySemaphore_Wakeup: parking_lot:
-  ReleaseSemaphore failed (error: 6)` — ERROR_INVALID_HANDLE on a
-  *CPython-internal* semaphore, i.e. the symptom of handle/heap corruption
-  rather than an error path. Seen in CI roughly 1 run in 8, always under
-  `terminate()` → `MPVInter.stop` → `WindowsSocket.stop` → `join`.
-  The mechanism: `PipeConnection._recv_bytes` parks the reader thread in
+- **FIXED 2026-08-31: the Windows transport used to abort the interpreter.**
+  `Fatal Python error: _PySemaphore_Wakeup: parking_lot: ReleaseSemaphore
+  failed (error: 6)` — ERROR_INVALID_HANDLE on a *CPython-internal* semaphore,
+  i.e. handle/heap corruption rather than an error path. Seen twice in CI,
+  on **3.14** (2026-08-18) and **3.13** (2026-08-31), always under
+  `terminate()` → `MPVInter.stop` → `WindowsSocket.stop` → `join`. It was not
+  a 3.14 regression: 3.13+ allocates thread primitives from the parking lot,
+  which changed where the corruption *lands*, not whether it happens. Older
+  Pythons were quieter, not safer.
+  The mechanism was `PipeConnection._recv_bytes` parking the reader in
   `WaitForMultipleObjects([ov.event], INFINITE)` with an **overlapped read
-  still pending** on the handle and a kernel-owned buffer inside `ov`, and
-  `WindowsSocket.stop` then calls `close()` on that handle **from another
-  thread**. Closing a handle with I/O outstanding is undefined; the kernel
-  may still write into a buffer that is being torn down. CPython 3.13+
-  replaced its thread primitives with the parking-lot `_PySemaphore`, which
-  is why latent corruption now aborts instead of passing unnoticed. This is
-  exactly the failure the Windows version matrix exists to catch — a Python
-  upgrade breaking us with no change of ours — and it argues for the ctypes
-  or vendored rewrite below rather than a patch. A correct fix has the thread
-  that owns the blocking read own the handle: wake it (broken pipe or a
-  sentinel) and let it close its own handle, instead of closing underneath
-  it. Do not "fix" this by only bounding the join; that hides the abort
-  behind a timeout without removing the corruption.
-- **The Windows transport is built on two CPython internals with no compatibility contract**, and this is deliberate. `_winapi` is a private C extension; `PipeConnection` is not in `multiprocessing.connection.__all__` (which is `['Client', 'Listener', 'Pipe', 'wait']`), is defined conditionally inside `if _winapi:`, and is an implementation detail of `Pipe()` — we construct it from a handle we opened ourselves with `FILE_FLAG_OVERLAPPED`. It was chosen over `pywin32` because every native dependency costs downstream projects a PyInstaller fight (hooks, `pythoncom`/`pywintypes` DLLs, post-install registration), and it has held for six years. **Do not "tidy" these imports away** — a plain `open(r'\\.\pipe\...')` cannot do overlapped I/O, and `stop()` relies on closing the handle to break a blocked read. If they ever have to go, the replacement is `ctypes` against `kernel32` (stdlib, no hooks, PyInstaller-clean — the same property that motivated the original choice), or vendoring the ~80 lines of `_close`/`_send_bytes`/`_recv_bytes`/`_get_more_data` from CPython's `connection.py` under the PSF licence. Note this breaks on a *Python* upgrade rather than a code change, which is why the Windows CI leg needs a version matrix on a schedule, including prereleases.
+  still pending** and a kernel-owned buffer inside `ov`, while
+  `WindowsSocket.stop` closed that handle **from another thread**. Note this
+  was CPython's gap as much as ours: `PipeConnection._close` cancels a pending
+  *send* before closing but has no equivalent for a pending *read*, and the
+  class says outright that it "should only be used by a single thread".
+  **The fix is structural, so do not undo its shape.** `stop()` now signals an
+  event; the reader cancels its own read, waits for
+  `GetOverlappedResult(wait=True)` to confirm the kernel is finished with the
+  buffer, and closes the handle it owns. Nothing is ever closed with I/O
+  outstanding. Do not "simplify" this back to closing from `stop()`, and do
+  not bound the join instead — that only hides the abort behind a timeout.
+
+- **The Windows transport is `ctypes` against `kernel32`** (`_transfer`,
+  `_close`, `_ipc_endpoint_ready`), which replaced `_winapi` plus
+  `multiprocessing.connection.PipeConnection` in the fix above. Neither of
+  those carried a compatibility contract — `_winapi` is a private C extension
+  and `PipeConnection` is absent from `__all__`, defined conditionally, and an
+  implementation detail of `Pipe()` — so the transport broke along the
+  *Python* axis rather than ours, which is why the Windows matrix runs on a
+  schedule with prereleases. ctypes keeps the property the original choice was
+  actually buying over `pywin32`: stdlib, no hooks, no `pythoncom`/
+  `pywintypes` DLLs, PyInstaller-clean, which is why downstream projects
+  adopted this library. `FILE_FLAG_OVERLAPPED` is still essential — a plain
+  `open(r'\\.\pipe\...')` cannot do overlapped I/O.
+  **The reader thread must never hold `_io_lock` across its read.** That lock
+  exists only to keep a `send` and the close apart; held across the blocking
+  read it deadlocks every send until MPV happens to speak.
+  **Do not name any attribute `_handle`.** `threading.Thread` owns that name
+  from 3.13 on, so the pipe handle is `_pipe`, and `Thread.__init__` is called
+  *first* so its attributes cannot land on top of ours.
 
 ## Testing
 
@@ -101,6 +120,24 @@ change them deliberately and say so in the commit.
 
 A new test's review question is *which field of the real object did I not
 model, and is that the field the test is named after?*
+
+There is a third, run by hand: **`tests/pipe_transport_check.py`** drives
+`WindowsSocket` against a loopback named pipe, so no mpv is started and a
+cycle costs a pipe rather than a process. It is not collected by `discover`
+(which only takes `test*.py`) and runs on any Windows interpreter — including
+one under wine, which is how the transport can be *run* while being edited
+from a Linux machine instead of first executing in CI. The embeddable zip in
+a `WINEARCH=win64` prefix is enough; no installer, no mpv. (The default
+`~/.wine` here is win32 and refuses a 64-bit `python.exe` with a misleading
+"wine32 is missing" — make a fresh prefix, don't chase that message.) It
+earned its place immediately by catching a fatal `_handle` collision that
+review had not.
+
+**Be exact about what it proves.** Under wine it covers behaviour and the
+ctypes prototypes only — it says nothing about the memory corruption, because
+wine's named pipes are wine's own and the *old* PipeConnection code also
+survives 2000 cycles of it. A green wine run is never permission to skip the
+Windows CI leg.
 
 ### The golden API surface
 
@@ -185,9 +222,12 @@ than rediscovered:
 ### CI
 
 `.github/workflows/test.yml` — Linux (3.9/3.11/3.13) and **Windows
-(3.9-3.14)**. The Windows matrix is wider on purpose: `_winapi` and
-`PipeConnection` break along the *Python* axis, not ours, so there is also a
-Monday `schedule:` run and a `3.15-dev` leg to hear about it before users do.
+(3.9-3.14)**. The Windows matrix is wider on purpose: the transport rides on
+Windows and interpreter behaviour rather than on anything this repo controls,
+so it breaks along the *Python* axis. That is not hypothetical — the schedule
+is what caught the teardown corruption twice, on 3.13 and 3.14, and the second
+time on a `master` that had not changed. Hence the Monday `schedule:` run and
+the `3.15-dev` leg, to hear about it before users do.
 That job is deliberately **not** `continue-on-error`: it never runs on push or
 pull_request, so it cannot block anyone, and GitHub notifies on a failed *run*
 rather than a failed job inside a passing one — swallowing its failure would
