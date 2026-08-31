@@ -246,6 +246,21 @@ than rediscovered:
   and escalates to `kill()`. The deterministic assertion is
   `process.returncode is not None` — `terminate()` alone never sets it, so
   that catches a regression without racing.
+* **`EventHandler.stop(join)` passes the *flag* as `Thread.join`'s
+  *timeout*.** `join=True` therefore means "wait up to 1.0 seconds" and never
+  confirms the thread exited -- measured, not read. Pre-existing and left
+  alone deliberately: fixing it changes what `terminate()` waits for. It is
+  why `stress_teardown.py` settles before counting threads, or a loaded
+  runner would fail the leak assertion for a run in which nothing leaked.
+* **`terminate(join=False)` must stay non-blocking**, and it is not only a
+  public API: `_quit_callback` takes it from the reader thread. Making
+  `stop()` wait silently gave it a 5s + 5s budget it never asked for, and
+  `__del__` inherits the same cost. `MPVProcess.stop(timeout=None)` is the
+  opt-out that keeps it honest.
+* **`terminate()` re-enters itself.** Closing the socket wakes the reader into
+  `_quit_callback`, which calls `terminate(join=False)` again -- so on any
+  mock of the teardown path the *last* call is the internal one whatever the
+  caller asked for. Assert on the first.
 
 ### CI
 
