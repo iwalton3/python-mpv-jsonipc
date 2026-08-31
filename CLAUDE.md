@@ -252,11 +252,14 @@ than rediscovered:
   alone deliberately: fixing it changes what `terminate()` waits for. It is
   why `stress_teardown.py` settles before counting threads, or a loaded
   runner would fail the leak assertion for a run in which nothing leaked.
-* **`terminate(join=False)` must stay non-blocking**, and it is not only a
-  public API: `_quit_callback` takes it from the reader thread. Making
-  `stop()` wait silently gave it a 5s + 5s budget it never asked for, and
-  `__del__` inherits the same cost. `MPVProcess.stop(timeout=None)` is the
-  opt-out that keeps it honest.
+* **`join` is about joining *threads*, not about blocking**, and it must not
+  gate the process wait. It is undocumented in both the docstring and
+  `docs.md`, and every use of it reaches a `Thread.join` and nothing else;
+  `_quit_callback` passes `False` only because a thread cannot join itself. A
+  review read it as "the non-blocking teardown path" and that premise was
+  simply invented -- letting it skip the wait handed the orphaned-MPV bug
+  straight back to anyone who passed it. `terminate()` waits for MPV either
+  way, because a `terminate()` that does not terminate is the worse failure.
 * **`terminate()` re-enters itself.** Closing the socket wakes the reader into
   `_quit_callback`, which calls `terminate(join=False)` again -- so on any
   mock of the teardown path the *last* call is the internal one whatever the

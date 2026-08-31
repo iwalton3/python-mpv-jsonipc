@@ -616,24 +616,22 @@ class MPVProcess:
         """Terminate the process, and do not return while it may still be alive.
 
         *timeout* is the seconds to wait for a polite exit before killing, and
-        again for the kill to land. ``None`` returns without waiting at all,
-        which is what ``MPV.terminate(join=False)`` asks for.
+        again for the kill to land.
         """
         # terminate() only *asks*. Returning here while MPV is still running
         # left the caller no supported way to wait for it -- and a caller that
         # exits at that moment orphans an MPV still holding its stdout. Both
         # waits are bounded so a wedged MPV cannot hang teardown.
         self.process.terminate()
-        if timeout is not None:
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.warning("MPV ignored terminate for {0}s; killing it.".format(timeout))
+            self.process.kill()
             try:
                 self.process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                log.warning("MPV ignored terminate for {0}s; killing it.".format(timeout))
-                self.process.kill()
-                try:
-                    self.process.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    log.error("MPV survived kill; giving up on reaping it.")
+                log.error("MPV survived kill; giving up on reaping it.")
         if os.name != 'nt':
             # try/except rather than exists()-then-remove, because two threads
             # reach here: the caller's terminate(), and the reader's
@@ -1048,11 +1046,12 @@ class MPV:
     def terminate(self, join=True):
         """Terminate the connection to MPV and process (if *start_mpv* is used)."""
         if self.mpv_process:
-            # join=False is the documented non-blocking teardown -- and the
-            # path _quit_callback takes from the reader thread. Making it wait
-            # up to ten seconds for MPV to die would be a new way to block a
-            # caller who asked specifically not to be blocked.
-            self.mpv_process.stop(timeout=None if not join else 5)
+            # Unconditionally, regardless of *join*: that flag governs whether
+            # we join our *threads*, and _quit_callback passes False only
+            # because a thread cannot join itself. Letting it skip the wait
+            # would hand back the orphaned-MPV bug to anyone who passes it,
+            # and a terminate() that does not terminate is the worse failure.
+            self.mpv_process.stop()
         if self.mpv_inter:
             self.mpv_inter.stop(join)
         self.event_handler.stop(join)

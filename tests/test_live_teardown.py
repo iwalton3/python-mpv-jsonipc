@@ -175,14 +175,6 @@ class StopWaitingTest(unittest.TestCase):
         process.ipc_socket = os.path.join(tempfile.mkdtemp(), socket_name)
         return process
 
-    def test_a_timeout_of_none_does_not_wait_at_all(self):
-        process = self._process()
-
-        process.stop(timeout=None)
-
-        self.assertEqual(process.process.waits, [])
-        self.assertFalse(process.process.killed)
-
     def test_a_timeout_waits_then_escalates_to_kill(self):
         process = self._process()
 
@@ -197,37 +189,30 @@ class StopWaitingTest(unittest.TestCase):
         # Swallowing every OSError would hide a permission problem or a path
         # that is not the socket we think it is.
         process = self._process()
+        process.process.killed = True   # so the wait returns instead of escalating
         with mock.patch("os.remove", side_effect=PermissionError("nope")):
             with self.assertRaises(PermissionError):
-                process.stop(timeout=None)
+                process.stop(timeout=0)
 
 
 @requires_mpv
-class NonBlockingTerminateTest(unittest.TestCase):
-    def test_terminate_join_false_asks_the_process_not_to_wait(self):
-        # join=False is the non-blocking teardown, and the path
-        # _quit_callback takes from the reader thread. Waiting up to ten
-        # seconds there would block a caller who asked not to be blocked.
+class TerminateAlwaysTerminatesTest(unittest.TestCase):
+    def test_it_reaps_mpv_even_when_asked_not_to_join(self):
+        # `join` governs whether we join our *threads* -- _quit_callback
+        # passes False only because a thread cannot join itself. It is not a
+        # "do not block" flag: it is undocumented in both the docstring and
+        # docs.md, and every use of it reaches a Thread.join and nothing else.
+        # So it must not gate the process wait, or passing it hands back the
+        # orphaned MPV this file exists to prevent.
         mpv = start_mpv()
-        self.addCleanup(mpv.terminate)
+        process = mpv.mpv_process.process
 
-        with mock.patch.object(mpv.mpv_process, "stop") as stop:
-            mpv.terminate(join=False)
+        mpv.terminate(join=False)
 
-        # call_args_list[0], not call_args: terminate() re-enters itself.
-        # Closing the socket wakes the reader into _quit_callback, which calls
-        # terminate(join=False) again, so the *last* call is always the
-        # internal one whichever way the caller asked.
-        self.assertEqual(stop.call_args_list[0], mock.call(timeout=None))
-
-    def test_terminate_by_default_still_waits(self):
-        mpv = start_mpv()
-        self.addCleanup(mpv.terminate)
-
-        with mock.patch.object(mpv.mpv_process, "stop") as stop:
-            mpv.terminate()
-
-        self.assertEqual(stop.call_args_list[0], mock.call(timeout=5))
+        self.assertIsNotNone(
+            process.returncode,
+            "terminate(join=False) left MPV unreaped; join is about threads, "
+            "not about whether MPV actually dies")
 
 
 @requires_mpv
