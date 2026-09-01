@@ -284,23 +284,36 @@ class WindowsSocket(threading.Thread):
         ov.hEvent = event
         _kernel32.ResetEvent(event)
         moved = _w.DWORD(0)
-        if func(self._pipe, buf, size, ctypes.byref(moved), ctypes.byref(ov)):
-            return moved.value
 
-        err = ctypes.get_last_error()
-        if err in _PEER_GONE:
-            return None
-        if err != _ERROR_IO_PENDING:
-            raise ctypes.WinError(err)
-
-        # From here the kernel owns *buf* and *ov* until the operation
-        # actually finishes, so EVERY exit from this block -- including an
-        # exception -- has to go through the GetOverlappedResult below.
-        # Returning or raising without it destroys this frame, and its buffer,
-        # with a read still outstanding, which is the corruption this class
-        # exists to remove. CPython's own PipeConnection._recv_bytes uses this
-        # same except/finally shape for the same reason.
+        # The guarded region starts *before* the call, and assumes the
+        # operation may be outstanding until proven otherwise. An
+        # asynchronous exception -- a KeyboardInterrupt, which lands on the
+        # main thread, which is where send() runs -- can arrive between the
+        # call returning ERROR_IO_PENDING and any flag recording that, so a
+        # flag set after the call is wrong in exactly the direction that
+        # matters: it would let the frame, and its buffer, go while the kernel
+        # still owns them. Assuming the worst costs nothing when nothing was
+        # started, because a fresh OVERLAPPED has Internal = STATUS_SUCCESS
+        # and GetOverlappedResult then returns immediately (measured).
+        outstanding = True
         try:
+            if func(self._pipe, buf, size, ctypes.byref(moved),
+                    ctypes.byref(ov)):
+                outstanding = False
+                return moved.value
+
+            err = ctypes.get_last_error()
+            if err != _ERROR_IO_PENDING:
+                outstanding = False
+                if err in _PEER_GONE:
+                    return None
+                if err == _ERROR_MORE_DATA:
+                    # A completed read that filled the buffer, not a failure.
+                    # The completion path below already treats it that way;
+                    # raising here would have desynchronised the two.
+                    return moved.value
+                raise ctypes.WinError(err)
+
             handles = (_w.HANDLE * 2)(event, self._stop_event)
             waitres = _kernel32.WaitForMultipleObjects(2, handles, False,
                                                        _INFINITE)
@@ -315,15 +328,15 @@ class WindowsSocket(threading.Thread):
                 if waitres != _WAIT_OBJECT_0 + 1:
                     raise ctypes.WinError(waitfail)
         except BaseException:
-            # BaseException, not Exception: a KeyboardInterrupt delivered at
-            # any bytecode boundary above must not escape with I/O pending.
-            _kernel32.CancelIoEx(self._pipe, ctypes.byref(ov))
+            if outstanding:
+                _kernel32.CancelIoEx(self._pipe, ctypes.byref(ov))
             raise
         finally:
             # Cancelling only *asks*. This is the wait that makes it true.
-            completed = _kernel32.GetOverlappedResult(
-                self._pipe, ctypes.byref(ov), ctypes.byref(moved), True)
-            failure = 0 if completed else ctypes.get_last_error()
+            if outstanding:
+                completed = _kernel32.GetOverlappedResult(
+                    self._pipe, ctypes.byref(ov), ctypes.byref(moved), True)
+                failure = 0 if completed else ctypes.get_last_error()
 
         if not completed:
             if failure in _PEER_GONE or failure == _ERROR_OPERATION_ABORTED:
@@ -361,12 +374,14 @@ class WindowsSocket(threading.Thread):
         with self._handle_lock:
             if self._stop_event:
                 _kernel32.SetEvent(self._stop_event)
-        # `self is not current_thread()`, not is_alive(): is_alive() is True
-        # for the calling thread, so it never prevented the self-join it looks
-        # like it prevents. The reader reaches here whenever a user's
-        # quit_callback calls terminate(), and joining yourself is a
-        # RuntimeError that would escape run() and leak the event handler.
-        if join and self is not threading.current_thread():
+        # Two ways join() raises, and both would skip the _close() below and
+        # leak all four handles. is_alive() is True for the calling thread, so
+        # it never prevented the self-join it looked like it prevented -- the
+        # reader reaches here whenever a user's quit_callback calls
+        # terminate(). And `ident is None` means start() was never called,
+        # where join() raises too.
+        if (join and self.ident is not None
+                and self is not threading.current_thread()):
             self.join()
         if not self.is_alive():
             # The reader has finished, or never ran. Either way nothing can
@@ -471,11 +486,12 @@ class UnixSocket(threading.Thread):
                 sock.close()
             except OSError:
                 pass # Ignore socket close failure.
-        # Not a bare `if join`: the reader thread reaches here whenever a
-        # user's quit_callback calls terminate(), and joining yourself raises
-        # RuntimeError -- which escaped run(), skipped the internal
-        # terminate(join=False) after it, and leaked the event handler.
-        if join and self is not threading.current_thread():
+        # Not a bare `if join`: the reader reaches here whenever a user's
+        # quit_callback calls terminate(), and joining yourself raises -- which
+        # escaped run() and leaked the event handler. `ident is None` is the
+        # never-started case, where join() raises as well.
+        if (join and self.ident is not None
+                and self is not threading.current_thread()):
             self.join()
 
     def send(self, data):
