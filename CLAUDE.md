@@ -96,6 +96,30 @@ A separate `EventHandler` thread serializes user callbacks (events, property obs
   from 3.13 on, so the pipe handle is `_pipe`, and `Thread.__init__` is called
   *first* so its attributes cannot land on top of ours.
 
+- **`_transfer`'s guarded region starts *before* the syscall, and that is
+  load-bearing.** Once `ReadFile`/`WriteFile` returns `ERROR_IO_PENDING` the
+  kernel owns the buffer, so every exit — exception included — must reach
+  `GetOverlappedResult(wait=True)`. Recording "pending" *after* the call does
+  not work: an asynchronous exception (a `KeyboardInterrupt`, on the main
+  thread, which is where `send()` runs) can land between the call returning
+  and the flag being set. Hence "assume outstanding until proven otherwise".
+  That is only free because **a fresh `OVERLAPPED` has
+  `Internal = STATUS_SUCCESS`, so `GetOverlappedResult` returns immediately
+  when nothing was started** — measured on Windows at 0.0000s, not assumed.
+  Three separate passes each found the previous version of this still
+  incomplete on an exception path; treat that as the prior for edits here.
+
+- **`CancelIoEx` overwrites the thread's last error.** Read
+  `ctypes.get_last_error()` *before* cancelling, or a failed
+  `WaitForMultipleObjects` reports the cancel's success and the real cause is
+  gone — on the path that is hardest to reproduce.
+
+- **`Thread.join()` raises two different ways, and a guard needs both.**
+  Joining yourself (`is_alive()` is True for the calling thread, so it is no
+  guard at all) and joining a thread that was never started. `ident is None`
+  is the public test for the second. Getting only one of them wrong leaked
+  every handle, because the raise escaped before `_close()`.
+
 ## Testing
 
 ```bash
@@ -263,6 +287,21 @@ than rediscovered:
   and escalates to `kill()`. The deterministic assertion is
   `process.returncode is not None` — `terminate()` alone never sets it, so
   that catches a regression without racing.
+* **Making `stop()` wait widened every check-then-act in teardown, not just
+  one.** The wait ends on the same MPV exit that wakes the reader into
+  `quit_callback` → `terminate(join=False)`, so two threads now arrive in
+  teardown together as a matter of course. That turned a latent race in
+  `MPVProcess.stop()`'s unlink *and* one in `UnixSocket.stop()`/`send()` into
+  reachable ones — the latter an `AttributeError` on `None`, which
+  `except OSError` does not catch. Both are fixed by binding once. **If you
+  add anything to a teardown path, audit it for re-read-after-check**, and
+  note that racing it is a poor test: 400 live cycles produced none, while
+  modelling the losing thread fails deterministically.
+* **A failed start now costs more.** `MPVProcess.__init__` reaps the child on
+  its failure paths, so a failed attempt goes from ≤10s to ≤20s worst case
+  and `MPV.__init__`'s five retries from ~55s to ~105s. That is the price of
+  not orphaning MPV, and it is bounded — but downstream projects with their
+  own startup timeouts can see it.
 * **`EventHandler.stop(join)` passes the *flag* as `Thread.join`'s
   *timeout*.** `join=True` therefore means "wait up to 1.0 seconds" and never
   confirms the thread exited -- measured, not read. Pre-existing and left
@@ -316,6 +355,19 @@ leg that cannot fail is worse than no leg. **Do not read a green run as
 proof** either — at ~1 abort per 2500–3000 teardowns this buys probability,
 not certainty.
 
+`pipe_transport_check.py` did not simply disappear from CI: it runs 300 cycles
+(~2s) in the ordinary **`windows`** job instead, which is where it belongs. It
+is the only check anywhere on the `ctypes` prototypes against the real
+kernel32, and it caught `Thread` owning `self._handle` on 3.13 — a
+break-along-the-Python-axis that the unittest suite cannot see and that this
+wide matrix exists for.
+
+**`STRESS_TIMEOUT` is seconds with no cycle completing, not a total budget.**
+It was a total-elapsed timer wearing a "no progress" message, which would have
+reported a merely slow runner as a deadlock on a leg that notifies, and forced
+the cycle count and the timeout to be retuned against each other. They are now
+independent.
+
 Three things in there are load-bearing and easy to undo by accident:
 
 * **The Linux `Install mpv` step is defended and bounded, because it hangs.**
@@ -346,6 +398,26 @@ Three things in there are load-bearing and easy to undo by accident:
   raise both together once upstream is clean. The Windows steps also *locate*
   `mpv.exe` after extraction rather than assuming a path, and fail loudly if
   it is missing.
+
+## What downstream can actually notice
+
+The public surface only gained three keyword arguments — no renames, no
+removals — so a break in a consumer will be *behavioural*. In rough order of
+how likely anyone is to hit it:
+
+* **`terminate()` blocks until MPV is gone**, up to 5s then a kill then 5s
+  more. It used to return immediately after SIGTERM. Normal MPV exits in
+  milliseconds; the budget only bites on one that ignores SIGTERM.
+* **A failed start costs up to ~105s over five retries**, up from ~55s,
+  because the failure paths now reap the child instead of orphaning it.
+* **`discard_output` defaults to False**, so MPV still inherits the caller's
+  stdout and stderr exactly as before. Anything that waits for EOF on that
+  pipe wants `discard_output=True`; nothing else changes.
+* **`quiet=` is still forwarded to MPV** as `--quiet`. It was tempting to name
+  the new keyword that, and it would have silently stopped passing an option
+  callers already use.
+* On Windows, a peer that *disconnects* rather than exits no longer logs an
+  ERROR and a traceback.
 
 ## Docs
 
