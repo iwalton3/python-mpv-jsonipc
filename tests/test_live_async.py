@@ -193,6 +193,16 @@ class TeardownTest(_AsyncTest):
         self.assertTrue(_wait(lambda: seen, 5))
         self.assertIsInstance(seen[0], BrokenPipeError)
 
+    def test_a_callback_can_terminate(self):
+        # The callback runs on the event thread, and terminate() stops that
+        # thread: it must not try to join itself.
+        future = self.mpv.command_async(
+            "get_property", "pause",
+            callback=lambda e, r: self.mpv.terminate())
+        self.assertIsNone(future.exception(timeout=10))
+        self.assertTrue(_wait(lambda: self.mpv.mpv_process.process.poll()
+                              is not None, 10), "mpv is still running")
+
 
 class ReplyRoutingTest(unittest.TestCase):
     """The reader thread's side, without a pipe. An exception here escapes

@@ -880,7 +880,10 @@ class EventHandler(threading.Thread):
         with self.stop_lock:
             self.stopped = True
             self.queue.put("quit")
-        self.join(join)
+        # A callback that calls terminate() is on this thread. The guard is
+        # the transports' (see UnixSocket.stop); `join` stays the timeout.
+        if self.ident is not None and self is not threading.current_thread():
+            self.join(join)
 
     def run(self):
         """Process socket events. Do not run this directly. Use *start*."""
