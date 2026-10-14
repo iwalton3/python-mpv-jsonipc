@@ -12,6 +12,7 @@ request that carries ``"async": true``.
 """
 
 import http.server
+import sys
 import threading
 import time
 import unittest
@@ -167,8 +168,9 @@ class CommandAsyncTest(_AsyncTest):
 
 
 class TeardownTest(_AsyncTest):
-    """Every future resolves. One left pending forever is a caller blocked
-    on ``result()`` forever, which is worse than the timeout this replaces."""
+    """A closed connection resolves every future, and nothing a callback
+    does strands one. One left pending forever is a caller blocked on
+    ``result()`` forever, which is worse than the timeout this replaces."""
 
     def test_terminate_fails_what_is_pending(self):
         future = self.mpv.command_async("sub-add", self.http.url(30))
@@ -203,6 +205,40 @@ class TeardownTest(_AsyncTest):
         self.assertTrue(_wait(lambda: self.mpv.mpv_process.process.poll()
                               is not None, 10), "mpv is still running")
 
+    def test_a_callback_that_exits_strands_nothing(self):
+        # A BaseException from a callback ends the event thread, as it always
+        # has; what was waiting behind it must still resolve, and so must
+        # what comes after.
+        def leave(error, result):
+            sys.exit(3)
+
+        first = self.mpv.command_async("get_property", "pause", callback=leave)
+        second = self.mpv.command_async("get_property", "pause")
+        self.assertIsInstance(first.exception(timeout=5), SystemExit)
+        self.assertIs(second.result(timeout=5), False)
+        self.assertTrue(_wait(lambda: not self.mpv.event_handler.is_alive(), 5))
+        self.assertIs(self.mpv.command_async("get_property", "pause")
+                      .result(timeout=5), False)
+
+    def test_mpv_dying_fails_a_waiting_command_at_once(self):
+        # command() used to wait out TIMEOUT (120 s) for a reply that could
+        # no longer come, holding whatever lock its caller held.
+        outcome = []
+
+        def wait():
+            try:
+                self.mpv.command("sub-add", self.http.url(30))
+            except BaseException as error:
+                outcome.append(error)
+
+        waiter = threading.Thread(target=wait, daemon=True)
+        waiter.start()
+        time.sleep(0.5)
+        self.mpv.mpv_process.process.kill()
+        waiter.join(10)
+        self.assertFalse(waiter.is_alive(), "command() is still waiting")
+        self.assertIsInstance(outcome[0], BrokenPipeError)
+
 
 class ReplyRoutingTest(unittest.TestCase):
     """The reader thread's side, without a pipe. An exception here escapes
@@ -235,6 +271,40 @@ class ReplyRoutingTest(unittest.TestCase):
         self.inter.event_callback(reply)
         self.inter.stop()
         self.assertEqual(seen, [(None, True)])
+
+    def test_a_raising_on_reply_loses_nothing_else_on_close(self):
+        seen, quits = [], []
+        self.inter.quit_callback = lambda: quits.append(True)
+
+        def bad(error, result):
+            raise ValueError("a caller's bug")
+
+        self.inter.command_async(bad, "get_property", "pause")
+        self.inter.command_async(lambda e, r: seen.append(e),
+                                 "get_property", "pause")
+        with self.assertLogs("mpv-jsonipc", "ERROR"):
+            self.inter._on_quit()
+        self.assertEqual(len(seen), 1)
+        self.assertIsInstance(seen[0], BrokenPipeError)
+        self.assertEqual(quits, [True])
+
+    def test_a_raising_on_reply_does_not_end_the_read_loop(self):
+        def bad(error, result):
+            raise ValueError("a caller's bug")
+
+        self.inter.command_async(bad, "get_property", "pause")
+        sent = self.inter.socket.send.call_args[0][0]
+        with self.assertLogs("mpv-jsonipc", "ERROR"):
+            self.inter.event_callback({"request_id": sent["request_id"],
+                                       "error": "success", "data": True})
+
+    def test_a_command_after_the_reader_died_fails_at_once(self):
+        # The reader's quit sweeps before anything stops the socket, so a
+        # send can still "succeed" into a dead connection in between.
+        self.inter._on_quit()
+        with mock.patch.object(python_mpv_jsonipc, "TIMEOUT", 2):
+            with self.assertRaises(BrokenPipeError):
+                self.inter.command("get_property", "pause")
 
     def test_a_send_that_fails_is_reported_to_the_callback(self):
         seen = []

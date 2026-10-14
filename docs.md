@@ -220,7 +220,8 @@ Issue a command to MPV. Will block until completed or timeout is reached.
 **command** is the name of the MPV command
 
 All further arguments are forwarded to the MPV command.  
-Throws TimeoutError if timeout of 120 seconds is reached.
+Throws TimeoutError if timeout of 120 seconds is reached, and  
+BrokenPipeError as soon as the connection closes before the reply.
 
 <a name=".python_mpv_jsonipc.MPVInter.command_async"></a>
 
@@ -269,6 +270,9 @@ Put a new task to the thread.
 **func** is the function to call
 
 All further arguments are forwarded to **func**.
+
+Returns False, without queueing it, once the thread has stopped --  
+by stop(), or because a task raised SystemExit or the like.
 
 <a name=".python_mpv_jsonipc.EventHandler.stop"></a>
 
@@ -450,6 +454,9 @@ Waits for the value of a property to change.
 
 **name** is the name of the property.
 
+Never call it from inside a callback here: the change is delivered on  
+the event thread, which the wait would be blocking, so it never ends.
+
 <a name=".python_mpv_jsonipc.MPV.play"></a>
 
 #### play
@@ -506,8 +513,15 @@ success, and the future then holds what it returns or raises.
 
 The callback runs on the event thread, like every other callback here  
 -- or, once **terminate** has stopped that, on whichever thread finds the  
-connection gone. Every future resolves: if the connection closes  
-first, with BrokenPipeError.
+connection gone. The future resolves when MPV answers or, if the  
+connection closes first, with BrokenPipeError -- meaning no answer  
+will come, not that the command did not run. Until then it is  
+pending: a command MPV is still running has no timeout.
+
+Never block on the future from inside a callback here (a property  
+observer, a key binding, an event, another command_async callback).  
+Those run on the event thread, the thread that resolves it, so the  
+wait never ends. python-mpv behaves the same.
 
 The future cannot be cancelled: MPV's IPC protocol cannot abort a  
 command. Needs MPV 0.33 or later; an older MPV ignores the request to  

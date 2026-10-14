@@ -700,6 +700,9 @@ class MPVProcess:
             except FileNotFoundError:
                 pass # The other thread got there first, which is all we wanted.
 
+#: Stands in a sync command's result slot when the connection closed first.
+_CLOSED = object()
+
 def _reply_outcome(data):
     """``(error, result)`` for one IPC reply."""
     if data["error"] == "success":
@@ -754,12 +757,26 @@ class MPVInter:
             self.quit_callback()
 
     def _fail_async(self):
-        """Answer every pending async command: nothing else ever will."""
+        """Answer every pending command, async or not: nothing else ever will."""
         with self.async_lock:
             self.closed = True
             pending, self.cid_async = self.cid_async, {}
+            for command_id, event in list(self.cid_wait.items()):
+                # setdefault: a reply that landed just before still wins.
+                self.cid_result.setdefault(command_id, _CLOSED)
+                event.set()
         for on_reply in pending.values():
-            on_reply(BrokenPipeError("MPV connection closed."), None)
+            self._deliver(on_reply, BrokenPipeError("MPV connection closed."),
+                          None)
+
+    def _deliver(self, on_reply, error, result):
+        """Call a caller's *on_reply* from a loop this class owns -- the
+        sweep or the reader -- where its exception would cost every reply
+        after it, as EventHandler.run guards each task for the same reason."""
+        try:
+            on_reply(error, result)
+        except Exception:
+            log.error("command_async reply handler raised.", exc_info=1)
 
     def event_callback(self, data):
         """Internal callback for recieving events from MPV."""
@@ -768,7 +785,7 @@ class MPVInter:
             with self.async_lock:
                 on_reply = self.cid_async.pop(request_id, None)
             if on_reply is not None:
-                on_reply(*_reply_outcome(data))
+                self._deliver(on_reply, *_reply_outcome(data))
                 return
             # Not indexed: a reply nobody waits for (mpv answers id 0 to a
             # request without one) would raise here, on the reader thread,
@@ -787,7 +804,8 @@ class MPVInter:
         *command* is the name of the MPV command
 
         All further arguments are forwarded to the MPV command.
-        Throws TimeoutError if timeout of 120 seconds is reached.
+        Throws TimeoutError if timeout of 120 seconds is reached, and
+        BrokenPipeError as soon as the connection closes before the reply.
         """
         self.rid_lock.acquire()
         command_id = self.command_id
@@ -795,7 +813,12 @@ class MPVInter:
         self.rid_lock.release()
 
         event = threading.Event()
-        self.cid_wait[command_id] = event
+        # Under the lock _fail_async takes, so a close either finds this
+        # waiter or is seen here first; neither way waits out TIMEOUT.
+        with self.async_lock:
+            if self.closed:
+                raise BrokenPipeError("MPV connection closed.")
+            self.cid_wait[command_id] = event
 
         command_list = [command]
         command_list.extend(args)
@@ -807,9 +830,10 @@ class MPVInter:
 
         has_event = event.wait(timeout=TIMEOUT)
         if has_event:
-            data = self.cid_result[command_id]
-            del self.cid_result[command_id]
+            data = self.cid_result.pop(command_id)
             del self.cid_wait[command_id]
+            if data is _CLOSED:
+                raise BrokenPipeError("MPV connection closed.")
             error, result = _reply_outcome(data)
             if error is not None:
                 raise error
@@ -867,7 +891,8 @@ class EventHandler(threading.Thread):
 
         All further arguments are forwarded to *func*.
 
-        Returns False, without queueing it, once the thread has been stopped.
+        Returns False, without queueing it, once the thread has stopped --
+        by stop(), or because a task raised SystemExit or the like.
         """
         with self.stop_lock:
             if self.stopped:
@@ -887,13 +912,34 @@ class EventHandler(threading.Thread):
 
     def run(self):
         """Process socket events. Do not run this directly. Use *start*."""
+        try:
+            while True:
+                event = self.queue.get()
+                if event == "quit":
+                    break
+                try:
+                    event[0](*event[1])
+                except Exception:
+                    log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
+        finally:
+            self._drain()
+
+    def _drain(self):
+        """A callback's SystemExit (or similar) ends this thread, as it always
+        has. Refuse work from here on, so put_task says so, and run what was
+        already queued: a command_async future may be waiting in it."""
+        with self.stop_lock:
+            self.stopped = True
         while True:
-            event = self.queue.get()
+            try:
+                event = self.queue.get_nowait()
+            except queue.Empty:
+                return
             if event == "quit":
-                break
+                continue
             try:
                 event[0](*event[1])
-            except Exception:
+            except BaseException:
                 log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
 
 class MPV:
@@ -1152,6 +1198,9 @@ class MPV:
         Waits for the value of a property to change.
 
         *name* is the name of the property.
+
+        Never call it from inside a callback here: the change is delivered on
+        the event thread, which the wait would be blocking, so it never ends.
         """
         event = threading.Event()
         first_event = True
@@ -1224,8 +1273,15 @@ class MPV:
 
         The callback runs on the event thread, like every other callback here
         -- or, once *terminate* has stopped that, on whichever thread finds the
-        connection gone. Every future resolves: if the connection closes
-        first, with BrokenPipeError.
+        connection gone. The future resolves when MPV answers or, if the
+        connection closes first, with BrokenPipeError -- meaning no answer
+        will come, not that the command did not run. Until then it is
+        pending: a command MPV is still running has no timeout.
+
+        Never block on the future from inside a callback here (a property
+        observer, a key binding, an event, another command_async callback).
+        Those run on the event thread, the thread that resolves it, so the
+        wait never ends. python-mpv behaves the same.
 
         The future cannot be cancelled: MPV's IPC protocol cannot abort a
         command. Needs MPV 0.33 or later; an older MPV ignores the request to
@@ -1243,10 +1299,12 @@ class MPV:
                     future.set_exception(error)
                 else:
                     future.set_result(result)
-            except Exception as ex:
+            except BaseException as ex:
+                future.set_exception(ex)
+                if not isinstance(ex, Exception):
+                    raise   # SystemExit and the like still end the thread
                 log.error("command_async callback for {0} raised.".format(
                     command), exc_info=1)
-                future.set_exception(ex)
 
         def on_reply(error, result):
             if not self.event_handler.put_task(finish, error, result):
