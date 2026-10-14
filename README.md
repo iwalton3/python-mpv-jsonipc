@@ -41,6 +41,10 @@ mpv.volume = 20
 # You can also send commands.
 mpv.command_name(arg1, arg2)
 
+# Or send one without waiting for it. Returns a concurrent.futures.Future.
+mpv.command_async("sub-add", "https://example.com/slow.srt",
+                  callback=lambda error, result: print(error or "loaded"))
+
 # Bind to key press events with a decorator
 @mpv.on_key_press("space")
 def space_handler():

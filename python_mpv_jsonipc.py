@@ -8,6 +8,7 @@ import subprocess
 import random
 import queue
 import logging
+from concurrent.futures import Future
 
 log = logging.getLogger('mpv-jsonipc')
 
@@ -699,6 +700,14 @@ class MPVProcess:
             except FileNotFoundError:
                 pass # The other thread got there first, which is all we wanted.
 
+def _reply_outcome(data):
+    """``(error, result)`` for one IPC reply."""
+    if data["error"] == "success":
+        return None, data.get("data")
+    if data["error"] == "property unavailable":
+        return None, None
+    return MPVError(data["error"]), None
+
 class MPVInter:
     """
     Low-level interface to MPV. Does NOT manage an mpv process. (Internal)
@@ -719,23 +728,55 @@ class MPVInter:
         if self.callback is None:
             self.callback = lambda event, data: None
 
-        self.socket = Socket(ipc_socket, self.event_callback, self.quit_callback)
-        self.socket.start()
         self.command_id = 1
         self.rid_lock = threading.Lock()
         self.socket_lock = threading.Lock()
         self.cid_result = {}
         self.cid_wait = {}
+        # Before the reader starts: it can deliver a reply, or die, at once.
+        self.cid_async = {}
+        self.async_lock = threading.Lock()
+        self.closed = False
+
+        self.socket = Socket(ipc_socket, self.event_callback, self._on_quit)
+        self.socket.start()
 
     def stop(self, join=True):
         """Terminate the underlying connection."""
         self.socket.stop(join)
+        # The reader's _on_quit usually gets here first. This one does not
+        # depend on it, so nothing is left pending once stop() returns.
+        self._fail_async()
+
+    def _on_quit(self):
+        self._fail_async()
+        if self.quit_callback:
+            self.quit_callback()
+
+    def _fail_async(self):
+        """Answer every pending async command: nothing else ever will."""
+        with self.async_lock:
+            self.closed = True
+            pending, self.cid_async = self.cid_async, {}
+        for on_reply in pending.values():
+            on_reply(BrokenPipeError("MPV connection closed."), None)
 
     def event_callback(self, data):
         """Internal callback for recieving events from MPV."""
         if "request_id" in data:
-            self.cid_result[data["request_id"]] = data
-            self.cid_wait[data["request_id"]].set()
+            request_id = data["request_id"]
+            with self.async_lock:
+                on_reply = self.cid_async.pop(request_id, None)
+            if on_reply is not None:
+                on_reply(*_reply_outcome(data))
+                return
+            # Not indexed: a reply nobody waits for (mpv answers id 0 to a
+            # request without one) would raise here, on the reader thread,
+            # and end the read loop as if the connection had died.
+            event = self.cid_wait.get(request_id)
+            if event is not None:
+                self.cid_result[request_id] = data
+                event.set()
         elif "event" in data:
             self.callback(data["event"], data)
 
@@ -769,20 +810,52 @@ class MPVInter:
             data = self.cid_result[command_id]
             del self.cid_result[command_id]
             del self.cid_wait[command_id]
-            if data["error"] != "success":
-                if data["error"] == "property unavailable":
-                    return None
-                raise MPVError(data["error"])
-            else:
-                return data.get("data")
+            error, result = _reply_outcome(data)
+            if error is not None:
+                raise error
+            return result
         else:
             raise TimeoutError("No response from MPV.")
+
+    def command_async(self, on_reply, command, *args):
+        """
+        Issue a command to MPV without waiting for it to finish.
+
+        *on_reply(error, result)* is called exactly once: with MPV's answer on
+        the transport's reader thread, or with BrokenPipeError on whichever
+        thread finds the connection gone. There is no timeout.
+        """
+        with self.rid_lock:
+            command_id = self.command_id
+            self.command_id += 1
+
+        with self.async_lock:
+            closed = self.closed
+            if not closed:
+                self.cid_async[command_id] = on_reply
+        if closed:
+            on_reply(BrokenPipeError("MPV connection closed."), None)
+            return
+
+        command_list = [command]
+        command_list.extend(args)
+        try:
+            with self.socket_lock:
+                self.socket.send({"command": command_list,
+                                  "request_id": command_id, "async": True})
+        except Exception as error:
+            with self.async_lock:
+                owned = self.cid_async.pop(command_id, None)
+            if owned is not None:   # else _fail_async has already answered
+                on_reply(error, None)
 
 class EventHandler(threading.Thread):
     """Event handling thread. (Internal)"""
     def __init__(self):
         """Create an instance of the thread."""
         self.queue = queue.Queue()
+        self.stopped = False
+        self.stop_lock = threading.Lock()
         threading.Thread.__init__(self)
         self.daemon = True
 
@@ -793,12 +866,20 @@ class EventHandler(threading.Thread):
         *func* is the function to call
 
         All further arguments are forwarded to *func*.
+
+        Returns False, without queueing it, once the thread has been stopped.
         """
-        self.queue.put((func, args))
+        with self.stop_lock:
+            if self.stopped:
+                return False
+            self.queue.put((func, args))
+            return True
 
     def stop(self, join=True):
         """Terminate the thread."""
-        self.queue.put("quit")
+        with self.stop_lock:
+            self.stopped = True
+            self.queue.put("quit")
         self.join(join)
 
     def run(self):
@@ -1125,6 +1206,51 @@ class MPV:
         All further arguments are forwarded to the MPV command.
         """
         return self.mpv_inter.command(command, *args)
+
+    def command_async(self, command, *args, callback=None):
+        """
+        Send a command to MPV without waiting for it to finish, for one that
+        can take a long time (``sub-add`` of a slow URL). Unlike *command*,
+        it holds neither the caller nor the connection: other commands are
+        answered while it runs, and it has no timeout.
+
+        Returns a ``concurrent.futures.Future``. With no *callback* it holds
+        MPV's result or the error, as *command* would have returned or raised.
+        *callback(error, result)* is called first, with *error* None on
+        success, and the future then holds what it returns or raises.
+
+        The callback runs on the event thread, like every other callback here
+        -- or, once *terminate* has stopped that, on whichever thread finds the
+        connection gone. Every future resolves: if the connection closes
+        first, with BrokenPipeError.
+
+        The future cannot be cancelled: MPV's IPC protocol cannot abort a
+        command. Needs MPV 0.33 or later; an older MPV ignores the request to
+        run in the background and runs the command as *command* does, blocking
+        every other command on the connection until it finishes.
+        """
+        future = Future()
+        future.set_running_or_notify_cancel()
+
+        def finish(error, result):
+            try:
+                if callback is not None:
+                    future.set_result(callback(error, result))
+                elif error is not None:
+                    future.set_exception(error)
+                else:
+                    future.set_result(result)
+            except Exception as ex:
+                log.error("command_async callback for {0} raised.".format(
+                    command), exc_info=1)
+                future.set_exception(ex)
+
+        def on_reply(error, result):
+            if not self.event_handler.put_task(finish, error, result):
+                finish(error, result)
+
+        self.mpv_inter.command_async(on_reply, command, *args)
+        return future
 
     def __getattr__(self, name):
         if name in self.properties:

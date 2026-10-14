@@ -222,6 +222,20 @@ Issue a command to MPV. Will block until completed or timeout is reached.
 All further arguments are forwarded to the MPV command.  
 Throws TimeoutError if timeout of 120 seconds is reached.
 
+<a name=".python_mpv_jsonipc.MPVInter.command_async"></a>
+
+#### command\_async
+
+``` python
+ | command_async(on_reply, command, **args)
+```
+
+Issue a command to MPV without waiting for it to finish.
+
+**on\_reply(error, result)** is called exactly once: with MPV's answer on  
+the transport's reader thread, or with BrokenPipeError on whichever  
+thread finds the connection gone. There is no timeout.
+
 <a name=".python_mpv_jsonipc.EventHandler"></a>
 
 ### EventHandler
@@ -471,3 +485,31 @@ compatibility with python-mpv, as it does not bind all of the commands.
 **command** is the command name.
 
 All further arguments are forwarded to the MPV command.
+
+<a name=".python_mpv_jsonipc.MPV.command_async"></a>
+
+#### command\_async
+
+``` python
+ | command_async(command, **args, *, callback=None)
+```
+
+Send a command to MPV without waiting for it to finish, for one that  
+can take a long time (`sub-add` of a slow URL). Unlike **command**,  
+it holds neither the caller nor the connection: other commands are  
+answered while it runs, and it has no timeout.
+
+Returns a `concurrent.futures.Future`. With no **callback** it holds  
+MPV's result or the error, as **command** would have returned or raised.  
+**callback(error, result)** is called first, with **error** None on  
+success, and the future then holds what it returns or raises.
+
+The callback runs on the event thread, like every other callback here  
+-- or, once **terminate** has stopped that, on whichever thread finds the  
+connection gone. Every future resolves: if the connection closes  
+first, with BrokenPipeError.
+
+The future cannot be cancelled: MPV's IPC protocol cannot abort a  
+command. Needs MPV 0.33 or later; an older MPV ignores the request to  
+run in the background and runs the command as **command** does, blocking  
+every other command on the connection until it finishes.

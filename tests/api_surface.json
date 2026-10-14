@@ -21,6 +21,7 @@
         "bind_key_press": "(self, name, callback)",
         "bind_property_observer": "(self, name, callback)",
         "command": "(self, command, *args)",
+        "command_async": "(self, command, *args, callback=None)",
         "event_callback": "(self, name)",
         "on_event": "(self, name)",
         "on_key_press": "(self, name)",
@@ -46,6 +47,7 @@
       "methods": {
         "__init__": "(self, ipc_socket, callback=None, quit_callback=None)",
         "command": "(self, command, *args)",
+        "command_async": "(self, on_reply, command, *args)",
         "event_callback": "(self, data)",
         "stop": "(self, join=True)"
       }
