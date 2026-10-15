@@ -12,7 +12,11 @@ request that carries ``"async": true``.
 """
 
 import http.server
+import json
+import os
+import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -385,6 +389,17 @@ class ReplyRoutingTest(unittest.TestCase):
         self.assertIsInstance(first.exception(0), SystemExit)
         self.assertIsInstance(second.exception(0), BrokenPipeError)
 
+    def test_a_raising_event_callback_is_logged(self):
+        def bad(event, data):
+            raise ValueError("a caller's bug")
+
+        self.inter.callback = bad
+        try:
+            with self.assertLogs("mpv-jsonipc", "ERROR"):
+                self.inter.event_callback({"event": "pause"})
+        except ValueError:
+            self.fail("the event callback's exception escaped event_callback")
+
     def test_a_command_after_the_reader_died_fails_at_once(self):
         # The reader's quit sweeps before anything stops the socket, so a
         # send can still "succeed" into a dead connection in between.
@@ -400,6 +415,44 @@ class ReplyRoutingTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertIsInstance(seen[0], BrokenPipeError)
 
+
+
+@unittest.skipIf(os.name == "nt", "the reader there is a named pipe")
+class RealReaderTest(unittest.TestCase):
+    """The stub above cannot show whether the read loop goes on afterwards;
+    a real UnixSocket reader against a fake mpv can."""
+
+    def test_an_exiting_event_callback_does_not_end_the_read_loop(self):
+        path = os.path.join(tempfile.mkdtemp(), "mpv.sock")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(path)
+        server.listen(1)
+        self.addCleanup(server.close)
+        accepted = []
+        threading.Thread(target=lambda: accepted.append(server.accept()[0]),
+                         daemon=True).start()
+
+        def leave(event, data):
+            raise SystemExit(3)
+
+        inter = python_mpv_jsonipc.MPVInter(path, callback=leave)
+        self.addCleanup(inter.stop)
+        self.assertTrue(_wait(lambda: accepted, 5))
+        peer = accepted[0]
+        self.addCleanup(peer.close)
+        seen = []
+        inter.command_async(lambda e, r: seen.append(r),
+                            "get_property", "pause")
+        request = json.loads(peer.recv(4096).split(b"\n")[0])
+        with self.assertLogs("mpv-jsonipc", "ERROR"):
+            peer.sendall(b'{"event": "pause"}\n')
+            peer.sendall(json.dumps({"request_id": request["request_id"],
+                                     "error": "success", "data": 7})
+                         .encode() + b"\n")
+            self.assertTrue(_wait(lambda: seen, 3),
+                            "the reply after the event was never read")
+        self.assertEqual(seen, [7])
+        self.assertTrue(inter.socket.is_alive())
 
 
 class EventThreadTest(unittest.TestCase):

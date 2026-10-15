@@ -802,7 +802,8 @@ class MPVInter:
                 self.cid_result[request_id] = data
                 event.set()
         elif "event" in data:
-            self.callback(data["event"], data)
+            _call_user("MPVInter event callback", self.callback,
+                       data["event"], data)
 
     def command(self, command, *args):
         """
