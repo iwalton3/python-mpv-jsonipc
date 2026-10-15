@@ -457,6 +457,20 @@ class RealReaderTest(unittest.TestCase):
         self.assertTrue(inter.socket.is_alive())
 
 
+class _BadRepr:
+    """A task's object whose repr raises: logging it must not cost the
+    tasks queued after it."""
+
+    def __repr__(self):
+        raise ValueError("bad repr")
+
+    def method(self):
+        pass
+
+    def raises(self):
+        raise RuntimeError("a caller's bug")
+
+
 class EventThreadTest(unittest.TestCase):
     def records(self):
         seen = []
@@ -483,6 +497,28 @@ class EventThreadTest(unittest.TestCase):
         handler.start()
         handler.stop(5)
         self.assertEqual([r for r in seen if r.levelno >= logging.WARNING], [])
+
+    def test_a_task_whose_repr_raises_strands_nothing_behind_it(self):
+        seen = []
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.put_task(sys.exit, 3)
+        handler.put_task(_BadRepr().method)
+        handler.put_task(seen.append, "after")
+        self.records()
+        handler.start()
+        handler.join(5)
+        self.assertEqual(seen, ["after"])
+
+    def test_a_raising_task_whose_repr_raises_does_not_end_the_thread(self):
+        seen = self.records()
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.start()
+        self.addCleanup(handler.stop, 5)
+        handler.put_task(_BadRepr().raises)
+        self.assertTrue(_wait(lambda: seen, 5))
+        time.sleep(0.1)
+        self.assertTrue(handler.is_alive(), "the event thread ended")
+        self.assertEqual([r.levelno for r in seen], [logging.ERROR])
 
     def test_what_was_queued_behind_an_exit_still_runs(self):
         # The first exit ends run(); the rest goes to _drain, which must

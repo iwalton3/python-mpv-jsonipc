@@ -932,12 +932,14 @@ class EventHandler(threading.Thread):
                 try:
                     event[0](*event[1])
                 except Exception:
-                    log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
+                    log.error("EventHandler caught exception from %s.", event, exc_info=1)
         except BaseException as ex:
-            log.warning("A callback raised {0!r}, ending the event thread: "
+            log.warning("A callback raised %r, ending the event thread: "
                         "property observers, key bindings and events will no "
                         "longer be delivered; command_async callbacks now run "
-                        "on the connection's reader thread.".format(ex))
+                        "on whichever thread delivers their outcome.", ex)
+            # Not _call_user, deliberately: a callback's SystemExit ends this
+            # thread, as it has since 2020.
             raise
         finally:
             self._drain()
@@ -955,7 +957,7 @@ class EventHandler(threading.Thread):
                 return
             if event == "quit":
                 continue
-            _call_user("EventHandler task {0}".format(event), event[0], *event[1])
+            _call_user("EventHandler task", event[0], *event[1])
 
 class MPV:
     """
