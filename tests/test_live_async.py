@@ -236,13 +236,19 @@ class TeardownTest(_AsyncTest):
             sys.exit(3)
 
         ran_on = []
-        self.mpv.command_async("get_property", "pause",
-                               callback=leave).exception(timeout=5)
-        self.assertTrue(_wait(lambda: not self.mpv.event_handler.is_alive(), 5))
-        self.assertIsInstance(self.mpv.command_async(
-            "get_property", "pause", callback=leave).exception(timeout=5),
-            SystemExit)
+        with self.assertLogs("mpv-jsonipc", "WARNING") as logs:
+            self.mpv.command_async("get_property", "pause",
+                                   callback=leave).exception(timeout=5)
+            self.assertTrue(
+                _wait(lambda: not self.mpv.event_handler.is_alive(), 5))
+            self.assertIsInstance(self.mpv.command_async(
+                "get_property", "pause", callback=leave).exception(timeout=5),
+                SystemExit)
+            # Logged after the future resolves, on the reader.
+            self.assertTrue(_wait(lambda: any(
+                r.levelname == "ERROR" for r in logs.records), 5))
         self.assertIs(ran_on[1], self.mpv.mpv_inter.socket)
+        self.assertIn("WARNING", [r.levelname for r in logs.records])
         with mock.patch.object(python_mpv_jsonipc, "TIMEOUT", 3):
             self.assertIs(self.mpv.command("get_property", "pause"), False)
         pending = self.mpv.command_async("sub-add", self.http.url(30))
