@@ -15,6 +15,7 @@ import http.server
 import json
 import logging
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -425,7 +426,9 @@ class RealReaderTest(unittest.TestCase):
     a real UnixSocket reader against a fake mpv can."""
 
     def test_an_exiting_event_callback_does_not_end_the_read_loop(self):
-        path = os.path.join(tempfile.mkdtemp(), "mpv.sock")
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "mpv.sock")
         server = socket.socket(socket.AF_UNIX)
         server.bind(path)
         server.listen(1)
