@@ -28,13 +28,6 @@ on:
     - cron: '0 6 * * 1'
 
 env:
-  # Pinned so a per-PR failure means "we broke it", not "mpv shipped today".
-  # shinchiro keeps only its latest ~30 releases, so a pin goes stale in a
-  # month or two and fails at "Download mpv" with "release not found": move
-  # it to a current release when that happens. Builds from 20260808 on
-  # hard-import vulkan-1.dll, which the "Build the Vulkan loader" step
-  # supplies.
-  MPV_WINDOWS_RELEASE: '20261015'
   # Turns "no mpv found" from a skip into a hard error. Without it, a wrong
   # MPV_BINARY skips every live test and the build goes green having tested
   # nothing -- the most expensive kind of passing CI.
@@ -123,9 +116,14 @@ jobs:
         run: |
           # The plain x86_64 build, not -v3: that one targets a newer
           # microarchitecture level and the pattern must not match it.
-          gh release download "$env:MPV_WINDOWS_RELEASE" `
+          # shinchiro's latest build, deliberately unpinned: a new mpv that
+          # breaks this library should turn CI red -- that is a canary, not
+          # noise. (A pin also went stale on its own: shinchiro keeps only
+          # ~30 releases.) Named in the log, so a red run says which build.
+          gh release download `
             --repo shinchiro/mpv-winbuild-cmake `
             --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          Get-ChildItem mpv-dist -Name | ForEach-Object { "mpv build: $_" }
           7z x mpv-dist\*.7z -ompv
           # Found, not assumed: if the archive ever grows a top-level
           # directory, a hard-coded path would silently point at nothing.
@@ -185,9 +183,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release download "$env:MPV_WINDOWS_RELEASE" `
+          # Latest, unpinned on purpose -- see the `windows` job.
+          gh release download `
             --repo shinchiro/mpv-winbuild-cmake `
             --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          Get-ChildItem mpv-dist -Name | ForEach-Object { "mpv build: $_" }
           7z x mpv-dist\*.7z -ompv
           $exe = (Get-ChildItem -Path mpv -Recurse -Filter mpv.exe |
                   Select-Object -First 1).FullName
@@ -256,9 +256,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release download "$env:MPV_WINDOWS_RELEASE" `
+          # Latest, unpinned on purpose -- see the `windows` job.
+          gh release download `
             --repo shinchiro/mpv-winbuild-cmake `
             --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          Get-ChildItem mpv-dist -Name | ForEach-Object { "mpv build: $_" }
           7z x mpv-dist\*.7z -ompv
           $exe = (Get-ChildItem -Path mpv -Recurse -Filter mpv.exe |
                   Select-Object -First 1).FullName
@@ -309,9 +311,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release download "$env:MPV_WINDOWS_RELEASE" `
+          # Latest, unpinned on purpose -- see the `windows` job.
+          gh release download `
             --repo shinchiro/mpv-winbuild-cmake `
             --pattern 'mpv-x86_64-2*.7z' --dir mpv-dist
+          Get-ChildItem mpv-dist -Name | ForEach-Object { "mpv build: $_" }
           7z x mpv-dist\*.7z -ompv
           # Found, not assumed: if the archive ever grows a top-level
           # directory, a hard-coded path would silently point at nothing.
