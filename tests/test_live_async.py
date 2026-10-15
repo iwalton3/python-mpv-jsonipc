@@ -13,6 +13,7 @@ request that carries ``"async": true``.
 
 import http.server
 import json
+import logging
 import os
 import socket
 import sys
@@ -456,6 +457,32 @@ class RealReaderTest(unittest.TestCase):
 
 
 class EventThreadTest(unittest.TestCase):
+    def records(self):
+        seen = []
+        handler = logging.Handler()
+        handler.emit = seen.append
+        logger = logging.getLogger("mpv-jsonipc")
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        return seen
+
+    def test_a_callback_ending_the_thread_warns_once(self):
+        seen = self.records()
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.start()
+        handler.put_task(sys.exit, 3)
+        handler.join(5)
+        self.assertFalse(handler.is_alive())
+        warnings = [r for r in seen if r.levelno == logging.WARNING]
+        self.assertEqual(len(warnings), 1, [r.getMessage() for r in seen])
+
+    def test_an_ordinary_stop_does_not_warn(self):
+        seen = self.records()
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.start()
+        handler.stop(5)
+        self.assertEqual([r for r in seen if r.levelno >= logging.WARNING], [])
+
     def test_what_was_queued_behind_an_exit_still_runs(self):
         # The first exit ends run(); the rest goes to _drain, which must
         # survive the second and still pass the third its arguments.

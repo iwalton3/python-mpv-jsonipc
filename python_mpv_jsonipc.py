@@ -929,6 +929,12 @@ class EventHandler(threading.Thread):
                     event[0](*event[1])
                 except Exception:
                     log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
+        except BaseException as ex:
+            log.warning("A callback raised {0!r}, ending the event thread: "
+                        "property observers, key bindings and events will no "
+                        "longer be delivered; command_async callbacks now run "
+                        "on the connection's reader thread.".format(ex))
+            raise
         finally:
             self._drain()
 
