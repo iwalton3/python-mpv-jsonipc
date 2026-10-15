@@ -173,9 +173,10 @@ class CommandAsyncTest(_AsyncTest):
 
 
 class TeardownTest(_AsyncTest):
-    """A closed connection resolves every future, and nothing a callback
-    does strands one. One left pending forever is a caller blocked on
-    ``result()`` forever, which is worse than the timeout this replaces."""
+    """A closed connection resolves every future, and a callback that
+    raises, SystemExit included, strands none. One left pending forever is a
+    caller blocked on ``result()`` forever, which is worse than the timeout
+    this replaces."""
 
     def test_terminate_fails_what_is_pending(self):
         future = self.mpv.command_async("sub-add", self.http.url(30))
