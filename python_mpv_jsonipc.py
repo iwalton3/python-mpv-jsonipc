@@ -708,6 +708,16 @@ class MPVProcess:
 #: Stands in a sync command's result slot when the connection closed first.
 _CLOSED = object()
 
+def _call_user(what, func, *args):
+    """Call user code from a thread this library owns, logging anything it
+    raises -- SystemExit included: a caller's bug must not end the reader,
+    the close sweep or the drain. Not for EventHandler.run, which a
+    BaseException still ends (see there)."""
+    try:
+        func(*args)
+    except BaseException:
+        log.error("%s raised.", what, exc_info=1)
+
 def _reply_outcome(data):
     """``(error, result)`` for one IPC reply."""
     if data["error"] == "success":
@@ -771,17 +781,8 @@ class MPVInter:
                 self.cid_result.setdefault(command_id, _CLOSED)
                 event.set()
         for on_reply in pending.values():
-            self._deliver(on_reply, BrokenPipeError("MPV connection closed."),
-                          None)
-
-    def _deliver(self, on_reply, error, result):
-        """Call a caller's *on_reply* from a loop this class owns -- the
-        sweep or the reader -- where its exception would cost every reply
-        after it, as EventHandler.run guards each task for the same reason."""
-        try:
-            on_reply(error, result)
-        except Exception:
-            log.error("command_async reply handler raised.", exc_info=1)
+            _call_user("command_async reply handler", on_reply,
+                       BrokenPipeError("MPV connection closed."), None)
 
     def event_callback(self, data):
         """Internal callback for recieving events from MPV."""
@@ -790,7 +791,8 @@ class MPVInter:
             with self.async_lock:
                 on_reply = self.cid_async.pop(request_id, None)
             if on_reply is not None:
-                self._deliver(on_reply, *_reply_outcome(data))
+                _call_user("command_async reply handler", on_reply,
+                           *_reply_outcome(data))
                 return
             # Not indexed: a reply nobody waits for (mpv answers id 0 to a
             # request without one) would raise here, on the reader thread,
@@ -942,10 +944,7 @@ class EventHandler(threading.Thread):
                 return
             if event == "quit":
                 continue
-            try:
-                event[0](*event[1])
-            except BaseException:
-                log.error("EventHandler caught exception from {0}.".format(event), exc_info=1)
+            _call_user("EventHandler task {0}".format(event), event[0], *event[1])
 
 class MPV:
     """
