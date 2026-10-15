@@ -421,8 +421,13 @@ class WindowsSocket(threading.Thread):
                 # finally below, only once its own read has returned.
                 nread = self._transfer(_kernel32.ReadFile, self._read_event,
                                        buf, len(buf))
-                if not nread:
+                if nread is None:   # the peer is gone, or stop()
                     break
+                if nread == 0:
+                    # A zero-length message, not the end: mpv's pipe is
+                    # message-mode and it answers an async command with an
+                    # empty write. Treating it as EOF closed the connection.
+                    continue
 
                 data += buf.raw[:nread]
                 if data[-1] != 10:

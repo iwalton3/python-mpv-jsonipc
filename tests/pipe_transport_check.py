@@ -82,13 +82,15 @@ class Peer(threading.Thread):
 
     daemon = True
 
-    def __init__(self, name):
+    def __init__(self, name, message=False):
         threading.Thread.__init__(self)
         # `pipe_name`, not `name`: Thread owns `name`. Same trap as the
         # library's `_handle`, and worth stating twice.
         self.pipe_name = r"\\.\pipe" + "\\" + name
+        # mpv's own pipe is PIPE_TYPE_MESSAGE (4), where a zero-length write
+        # arrives as a zero-length message; in byte mode it is a no-op.
         self.handle = _k32.CreateNamedPipeW(
-            self.pipe_name, 3, 0, 1, 65536, 65536, 0, None)
+            self.pipe_name, 3, 4 if message else 0, 1, 65536, 65536, 0, None)
         assert self.handle != _INVALID, ctypes.get_last_error()
         self.received = []
         self.ready = threading.Event()
@@ -122,7 +124,9 @@ class Peer(threading.Thread):
             self.received.append(buf.raw[:read.value])
 
     def write(self, obj):
-        blob = json.dumps(obj).encode("utf-8") + b"\n"
+        self.write_raw(json.dumps(obj).encode("utf-8") + b"\n")
+
+    def write_raw(self, blob):
         written = w.DWORD(0)
         _k32.WriteFile(self.handle, blob, len(blob), ctypes.byref(written),
                        None)
@@ -261,6 +265,32 @@ def test_send_after_stop():
         check("send after stop raises BrokenPipeError", True)
     except Exception as error:
         check("send after stop raises BrokenPipeError", False, repr(error))
+    peer.close()
+
+
+def test_an_empty_message_is_not_the_end():
+    # mpv answers an async command with an empty write -- json_execute_command
+    # returns "" rather than NULL, and ipc-win.c writes it -- and on its
+    # message-mode pipe that is a zero-length message. Read as end of stream,
+    # it closed the connection on every async command.
+    quits = threading.Event()
+    peer = Peer("wine-empty-message", message=True)
+    peer.start()
+    inbox = []
+    sock = m.WindowsSocket("wine-empty-message", callback=inbox.append,
+                           quit_callback=quits.set)
+    sock.start()
+    peer.ready.wait(5)
+    peer.write_raw(b"")
+    peer.write({"event": "after"})
+    for _ in range(500):
+        if inbox or quits.is_set():
+            break
+        time.sleep(0.002)
+    check("a zero-length message does not end the connection",
+          not quits.is_set() and inbox == [{"event": "after"}],
+          "quit=%s inbox=%r" % (quits.is_set(), inbox))
+    sock.stop()
     peer.close()
 
 
