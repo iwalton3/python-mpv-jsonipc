@@ -1295,11 +1295,16 @@ class MPV:
         here. If an earlier callback ended that thread by raising SystemExit
         or the like, a warning is logged, and property observers, key
         bindings and events are no longer delivered at all; command_async
-        callbacks still run, on the thread delivering the reply instead --
-        the connection's reader while MPV is connected, or the thread that
-        closes the connection. After *terminate*, the callback runs on the
-        calling thread before command_async returns. A SystemExit from a
-        callback on the reader or during the close is logged, not raised.
+        callbacks still run, on whichever thread delivers their outcome
+        instead -- the connection's reader while MPV is connected, or the
+        thread that closes the connection -- and a SystemExit from one there
+        is logged, not raised. With the event thread gone, a call made once
+        the connection has closed (by *terminate* or by MPV exiting), or
+        whose send fails, runs its callback on the calling thread before
+        command_async returns, and a SystemExit from it is raised to that
+        caller. A logging handler that raises SystemExit is not caught
+        anywhere: as in the standard library, it ends the thread that logged,
+        and in the close that leaves the futures after it unresolved.
 
         The future resolves when MPV answers or, if the connection closes
         first, with BrokenPipeError -- meaning no answer will come, not that
@@ -1337,7 +1342,7 @@ class MPV:
             except BaseException as ex:
                 future.set_exception(ex)
                 if not isinstance(ex, Exception):
-                    raise   # ends the event thread; _call_user logs it elsewhere
+                    raise   # which thread it reaches, and what happens: see the docstring
                 log.error("command_async callback for {0} raised.".format(
                     command), exc_info=1)
 
