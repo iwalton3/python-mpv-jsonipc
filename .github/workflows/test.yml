@@ -28,16 +28,13 @@ on:
     - cron: '0 6 * * 1'
 
 env:
-  # Pinned for two reasons. The mild one: a per-PR failure should mean "we
-  # broke it", not "mpv shipped today". The load-bearing one: shinchiro's
-  # builds from 20260808 onward link vulkan-1.dll as a HARD import, and the
-  # Vulkan loader is a driver-installed system component that a CI runner has
-  # no reason to have -- so a newer mpv simply refuses to start there, and
-  # every live test would fail for a reason that has nothing to do with this
-  # library. 20260610 is the last clean release. jellyfin-mpv-shim pins the
-  # same build for the same regression; raise both together once upstream is
-  # fixed.
-  MPV_WINDOWS_RELEASE: '20260610'
+  # Pinned so a per-PR failure means "we broke it", not "mpv shipped today".
+  # shinchiro keeps only its latest ~30 releases, so a pin goes stale in a
+  # month or two and fails at "Download mpv" with "release not found": move
+  # it to a current release when that happens. Builds from 20260808 on
+  # hard-import vulkan-1.dll, which the "Build the Vulkan loader" step
+  # supplies.
+  MPV_WINDOWS_RELEASE: '20261015'
   # Turns "no mpv found" from a skip into a hard error. Without it, a wrong
   # MPV_BINARY skips every live test and the build goes green having tested
   # nothing -- the most expensive kind of passing CI.
@@ -136,6 +133,14 @@ jobs:
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "mpv.exe not found after extraction" }
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build the Vulkan loader
+        # shinchiro's mpv hard-imports vulkan-1.dll, which a runner does not
+        # have, so without this mpv.exe does not start at all. See
+        # tools/build_win_vulkan_loader.py.
+        shell: pwsh
+        run: >-
+          python tools/build_win_vulkan_loader.py --against "$env:MPV_BINARY"
+          -o (Split-Path "$env:MPV_BINARY") --work "$env:RUNNER_TEMP\vulkan"
       - name: Run tests
         shell: pwsh
         timeout-minutes: 10
@@ -188,6 +193,14 @@ jobs:
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "mpv.exe not found after extraction" }
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build the Vulkan loader
+        # shinchiro's mpv hard-imports vulkan-1.dll, which a runner does not
+        # have, so without this mpv.exe does not start at all. See
+        # tools/build_win_vulkan_loader.py.
+        shell: pwsh
+        run: >-
+          python tools/build_win_vulkan_loader.py --against "$env:MPV_BINARY"
+          -o (Split-Path "$env:MPV_BINARY") --work "$env:RUNNER_TEMP\vulkan"
       - name: Run tests
         shell: pwsh
         timeout-minutes: 10
@@ -251,6 +264,14 @@ jobs:
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "mpv.exe not found after extraction" }
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build the Vulkan loader
+        # shinchiro's mpv hard-imports vulkan-1.dll, which a runner does not
+        # have, so without this mpv.exe does not start at all. See
+        # tools/build_win_vulkan_loader.py.
+        shell: pwsh
+        run: >-
+          python tools/build_win_vulkan_loader.py --against "$env:MPV_BINARY"
+          -o (Split-Path "$env:MPV_BINARY") --work "$env:RUNNER_TEMP\vulkan"
       - name: Stress the full teardown against real mpv
         # This is the detector. The whole `MPV.terminate()` path with the event
         # handler and process supervision in place -- the shape both real
@@ -298,6 +319,14 @@ jobs:
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "mpv.exe not found after extraction" }
           "MPV_BINARY=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build the Vulkan loader
+        # shinchiro's mpv hard-imports vulkan-1.dll, which a runner does not
+        # have, so without this mpv.exe does not start at all. See
+        # tools/build_win_vulkan_loader.py.
+        shell: pwsh
+        run: >-
+          python tools/build_win_vulkan_loader.py --against "$env:MPV_BINARY"
+          -o (Split-Path "$env:MPV_BINARY") --work "$env:RUNNER_TEMP\vulkan"
       - name: Freeze a client with PyInstaller
         run: |
           # Install rather than freezing from the checkout: PyInstaller's

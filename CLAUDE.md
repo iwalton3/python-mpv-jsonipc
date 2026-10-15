@@ -390,14 +390,16 @@ Three things in there are load-bearing and easy to undo by accident:
 * **`REQUIRE_MPV: '1'`** turns "no mpv found" from a skip into a hard error. A
   mistyped `MPV_BINARY` otherwise skips every live test and the build reports
   green having tested nothing.
-* **The mpv pin is `20260610`, and it is not just for reproducibility.**
-  shinchiro's builds from 20260808 onward link `vulkan-1.dll` as a hard
-  import; the Vulkan loader is driver-installed, so a newer mpv refuses to
-  start on a CI runner and every live test fails for reasons unrelated to this
-  library. jellyfin-mpv-shim pins the same build for the same regression —
-  raise both together once upstream is clean. The Windows steps also *locate*
-  `mpv.exe` after extraction rather than assuming a path, and fail loudly if
-  it is missing.
+* **The mpv pin goes stale on its own.** shinchiro keeps only its latest ~30
+  releases, so a pinned build disappears within a month or two and every
+  Windows job fails at "Download mpv" with `release not found` on a `master`
+  nobody touched (2026-10-12: `20260610` went). Move the pin to a current
+  release. Builds from 20260808 on link `vulkan-1.dll` as a hard import and a
+  runner has no Vulkan loader, so "Build the Vulkan loader" builds one from
+  pinned, hashed source (`tools/build_win_vulkan_loader.py`, copied from
+  jellyfin-mpv-shim) and puts it beside `mpv.exe`. The Windows steps also
+  *locate* `mpv.exe` after extraction rather than assuming a path, and fail
+  loudly if it is missing.
 
 ## What downstream can actually notice
 
