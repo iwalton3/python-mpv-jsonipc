@@ -1093,7 +1093,7 @@ class MPV:
         Internal handler for quit events.
         """
         if self.quit_callback:
-            self.quit_callback()
+            _call_user("quit_callback", self.quit_callback)
         self.terminate(join=False)
 
     def bind_event(self, name, callback):

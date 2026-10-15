@@ -178,6 +178,25 @@ class TerminateWaitsTest(unittest.TestCase):
 
         self.assertEqual(escaped, [])
 
+    def test_a_raising_quit_callback_still_terminates(self):
+        # A raise there used to skip the terminate(join=False) after it,
+        # leaving the event thread running with MPV gone.
+        mpv = start_mpv()
+        self.addCleanup(mpv.terminate)
+
+        def bad():
+            raise ValueError("a caller's bug")
+
+        mpv.quit_callback = bad
+        with self.assertLogs("mpv-jsonipc", "ERROR"):
+            mpv.mpv_process.process.kill()
+            deadline = time.time() + 5
+            while mpv.event_handler.is_alive() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(
+                mpv.event_handler.is_alive(),
+                "terminate never ran: the event thread is still alive")
+
     def test_the_process_is_reaped_not_merely_signalled(self):
         mpv = start_mpv()
         process = mpv.mpv_process.process
