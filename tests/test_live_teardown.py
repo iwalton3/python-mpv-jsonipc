@@ -30,6 +30,7 @@ that the cheap tests here cover postconditions, not interleavings.
 """
 
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -141,6 +142,8 @@ class TerminateWaitsTest(unittest.TestCase):
             spawned.append(process)
             return process
 
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
         with mock.patch.object(python_mpv_jsonipc.subprocess, "Popen", record), \
                 mock.patch.object(python_mpv_jsonipc, "_ipc_endpoint_ready",
                                   return_value=False), \
@@ -148,7 +151,7 @@ class TerminateWaitsTest(unittest.TestCase):
                                   _skip_only_the_readiness_poll()):
             with self.assertRaises(python_mpv_jsonipc.MPVProcessError):
                 python_mpv_jsonipc.MPVProcess(
-                    os.path.join(tempfile.mkdtemp(), "failed-start.sock"),
+                    os.path.join(directory, "failed-start.sock"),
                     MPV_BINARY, **LIVE_OPTIONS)
 
         self.assertEqual(len(spawned), 1)
@@ -177,6 +180,25 @@ class TerminateWaitsTest(unittest.TestCase):
         time.sleep(0.2)
 
         self.assertEqual(escaped, [])
+
+    def test_a_raising_quit_callback_still_terminates(self):
+        # A raise there used to skip the terminate(join=False) after it,
+        # leaving the event thread running with MPV gone.
+        mpv = start_mpv()
+        self.addCleanup(mpv.terminate)
+
+        def bad():
+            raise ValueError("a caller's bug")
+
+        mpv.quit_callback = bad
+        with self.assertLogs("mpv-jsonipc", "ERROR"):
+            mpv.mpv_process.process.kill()
+            deadline = time.time() + 5
+            while mpv.event_handler.is_alive() and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(
+                mpv.event_handler.is_alive(),
+                "terminate never ran: the event thread is still alive")
 
     def test_the_process_is_reaped_not_merely_signalled(self):
         mpv = start_mpv()
@@ -213,7 +235,9 @@ class StopWaitingTest(unittest.TestCase):
         process = python_mpv_jsonipc.MPVProcess.__new__(
             python_mpv_jsonipc.MPVProcess)
         process.process = self._Stubborn()
-        process.ipc_socket = os.path.join(tempfile.mkdtemp(), socket_name)
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        process.ipc_socket = os.path.join(directory, socket_name)
         return process
 
     def test_a_timeout_waits_then_escalates_to_kill(self):

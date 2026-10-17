@@ -98,8 +98,10 @@ class ArgumentTranslationTest(unittest.TestCase):
 class SocketPathTest(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX socket paths only")
     def test_a_stale_socket_file_is_removed_before_starting(self):
-        import tempfile
-        path = os.path.join(tempfile.mkdtemp(), "stale.sock")
+        import shutil, tempfile
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "stale.sock")
         with open(path, "w") as handle:
             handle.write("")
         self.assertTrue(os.path.exists(path))

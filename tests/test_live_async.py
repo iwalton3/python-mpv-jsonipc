@@ -12,7 +12,13 @@ request that carries ``"async": true``.
 """
 
 import http.server
+import json
+import logging
+import os
+import shutil
+import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -168,9 +174,10 @@ class CommandAsyncTest(_AsyncTest):
 
 
 class TeardownTest(_AsyncTest):
-    """A closed connection resolves every future, and nothing a callback
-    does strands one. One left pending forever is a caller blocked on
-    ``result()`` forever, which is worse than the timeout this replaces."""
+    """A closed connection resolves every future, and a callback that
+    raises, SystemExit included, strands none. One left pending forever is a
+    caller blocked on ``result()`` forever, which is worse than the timeout
+    this replaces."""
 
     def test_terminate_fails_what_is_pending(self):
         future = self.mpv.command_async("sub-add", self.http.url(30))
@@ -220,6 +227,34 @@ class TeardownTest(_AsyncTest):
         self.assertIs(self.mpv.command_async("get_property", "pause")
                       .result(timeout=5), False)
 
+    def test_a_callback_that_exits_on_the_reader_ends_nothing(self):
+        # Once a callback has ended the event thread, later callbacks run on
+        # the reader. One that exits there must not end the read loop too:
+        # replies still arrive, and mpv dying is still noticed.
+        def leave(error, result):
+            ran_on.append(threading.current_thread())
+            sys.exit(3)
+
+        ran_on = []
+        with self.assertLogs("mpv-jsonipc", "WARNING") as logs:
+            self.mpv.command_async("get_property", "pause",
+                                   callback=leave).exception(timeout=5)
+            self.assertTrue(
+                _wait(lambda: not self.mpv.event_handler.is_alive(), 5))
+            self.assertIsInstance(self.mpv.command_async(
+                "get_property", "pause", callback=leave).exception(timeout=5),
+                SystemExit)
+            # Logged after the future resolves, on the reader.
+            self.assertTrue(_wait(lambda: any(
+                r.levelname == "ERROR" for r in logs.records), 5))
+        self.assertIs(ran_on[1], self.mpv.mpv_inter.socket)
+        self.assertIn("WARNING", [r.levelname for r in logs.records])
+        with mock.patch.object(python_mpv_jsonipc, "TIMEOUT", 3):
+            self.assertIs(self.mpv.command("get_property", "pause"), False)
+        pending = self.mpv.command_async("sub-add", self.http.url(30))
+        self.mpv.mpv_process.process.kill()
+        self.assertIsInstance(pending.exception(timeout=5), BrokenPipeError)
+
     def test_mpv_dying_fails_a_waiting_command_at_once(self):
         # command() used to wait out TIMEOUT (120 s) for a reply that could
         # no longer come, holding whatever lock its caller held.
@@ -253,6 +288,24 @@ class ReplyRoutingTest(unittest.TestCase):
                           transport).start()
         self.addCleanup(mock.patch.stopall)
         self.inter = python_mpv_jsonipc.MPVInter("unused")
+        self.quits = []
+        self.inter.quit_callback = lambda: self.quits.append(True)
+
+    def player_whose_event_thread_is_gone(self):
+        """An MPV over the stub, in the state a callback's SystemExit leaves
+        it: put_task refuses, so callbacks run on whichever thread delivers
+        the reply."""
+        player = python_mpv_jsonipc.MPV.__new__(python_mpv_jsonipc.MPV)
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.stop(join=False)
+        for name, value in [("properties", set()), ("mpv_process", None),
+                            ("mpv_inter", self.inter),
+                            ("event_handler", handler)]:
+            object.__setattr__(player, name, value)
+        return player
+
+    def request_id(self, n):
+        return self.inter.socket.send.call_args_list[n][0][0]["request_id"]
 
     def test_a_reply_nobody_is_waiting_for_is_dropped(self):
         # mpv answers a request that carried no request_id with id 0.
@@ -298,6 +351,64 @@ class ReplyRoutingTest(unittest.TestCase):
             self.inter.event_callback({"request_id": sent["request_id"],
                                        "error": "success", "data": True})
 
+    def test_an_exiting_callback_on_the_reader_is_logged(self):
+        player = self.player_whose_event_thread_is_gone()
+        first = player.command_async("get_property", "pause",
+                                     callback=lambda e, r: sys.exit(3))
+        second = player.command_async("get_property", "pause")
+        try:
+            with self.assertLogs("mpv-jsonipc", "ERROR"):
+                self.inter.event_callback({"request_id": self.request_id(0),
+                                           "error": "success", "data": False})
+        except SystemExit:
+            self.fail("SystemExit escaped event_callback, ending the reader")
+        self.assertIsInstance(first.exception(0), SystemExit)
+        self.inter._on_quit()
+        self.assertIsInstance(second.exception(0), BrokenPipeError)
+        self.assertEqual(self.quits, [True])
+
+    def test_an_exiting_callback_does_not_cut_the_close_short(self):
+        player = self.player_whose_event_thread_is_gone()
+        first = player.command_async("get_property", "pause",
+                                     callback=lambda e, r: sys.exit(3))
+        rest = [player.command_async("get_property", "pause")
+                for _ in range(2)]
+        try:
+            with self.assertLogs("mpv-jsonipc", "ERROR"):
+                self.inter._on_quit()
+        except SystemExit:
+            self.fail("SystemExit escaped the close sweep")
+        self.assertIsInstance(first.exception(0), SystemExit)
+        for future in rest:
+            self.assertIsInstance(future.exception(0), BrokenPipeError)
+        self.assertEqual(self.quits, [True])
+
+    def test_terminate_logs_an_exiting_callback_instead_of_raising_it(self):
+        # The callback runs on terminate()'s caller here, but it is the
+        # library's close doing the calling: the rest must still resolve.
+        player = self.player_whose_event_thread_is_gone()
+        first = player.command_async("get_property", "pause",
+                                     callback=lambda e, r: sys.exit(3))
+        second = player.command_async("get_property", "pause")
+        try:
+            with self.assertLogs("mpv-jsonipc", "ERROR"):
+                player.terminate()
+        except SystemExit:
+            self.fail("SystemExit raised out of terminate()")
+        self.assertIsInstance(first.exception(0), SystemExit)
+        self.assertIsInstance(second.exception(0), BrokenPipeError)
+
+    def test_a_raising_event_callback_is_logged(self):
+        def bad(event, data):
+            raise ValueError("a caller's bug")
+
+        self.inter.callback = bad
+        try:
+            with self.assertLogs("mpv-jsonipc", "ERROR"):
+                self.inter.event_callback({"event": "pause"})
+        except ValueError:
+            self.fail("the event callback's exception escaped event_callback")
+
     def test_a_command_after_the_reader_died_fails_at_once(self):
         # The reader's quit sweeps before anything stops the socket, so a
         # send can still "succeed" into a dead connection in between.
@@ -312,6 +423,127 @@ class ReplyRoutingTest(unittest.TestCase):
         self.inter.command_async(lambda e, r: seen.append(e), "stop")
         self.assertEqual(len(seen), 1)
         self.assertIsInstance(seen[0], BrokenPipeError)
+
+
+
+@unittest.skipIf(os.name == "nt", "the reader there is a named pipe")
+class RealReaderTest(unittest.TestCase):
+    """The stub above cannot show whether the read loop goes on afterwards;
+    a real UnixSocket reader against a fake mpv can."""
+
+    def test_an_exiting_event_callback_does_not_end_the_read_loop(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        path = os.path.join(directory, "mpv.sock")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(path)
+        server.listen(1)
+        self.addCleanup(server.close)
+        accepted = []
+        threading.Thread(target=lambda: accepted.append(server.accept()[0]),
+                         daemon=True).start()
+
+        def leave(event, data):
+            raise SystemExit(3)
+
+        inter = python_mpv_jsonipc.MPVInter(path, callback=leave)
+        self.addCleanup(inter.stop)
+        self.assertTrue(_wait(lambda: accepted, 5))
+        peer = accepted[0]
+        self.addCleanup(peer.close)
+        seen = []
+        inter.command_async(lambda e, r: seen.append(r),
+                            "get_property", "pause")
+        request = json.loads(peer.recv(4096).split(b"\n")[0])
+        with self.assertLogs("mpv-jsonipc", "ERROR"):
+            peer.sendall(b'{"event": "pause"}\n')
+            peer.sendall(json.dumps({"request_id": request["request_id"],
+                                     "error": "success", "data": 7})
+                         .encode() + b"\n")
+            self.assertTrue(_wait(lambda: seen, 3),
+                            "the reply after the event was never read")
+        self.assertEqual(seen, [7])
+        self.assertTrue(inter.socket.is_alive())
+
+
+class _BadRepr:
+    """A task's object whose repr raises: logging it must not cost the
+    tasks queued after it."""
+
+    def __repr__(self):
+        raise ValueError("bad repr")
+
+    def method(self):
+        pass
+
+    def raises(self):
+        raise RuntimeError("a caller's bug")
+
+
+class EventThreadTest(unittest.TestCase):
+    def records(self):
+        seen = []
+        handler = logging.Handler()
+        handler.emit = seen.append
+        logger = logging.getLogger("mpv-jsonipc")
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        return seen
+
+    def test_a_callback_ending_the_thread_warns_once(self):
+        seen = self.records()
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.start()
+        handler.put_task(sys.exit, 3)
+        handler.join(5)
+        self.assertFalse(handler.is_alive())
+        warnings = [r for r in seen if r.levelno == logging.WARNING]
+        self.assertEqual(len(warnings), 1, [r.getMessage() for r in seen])
+
+    def test_an_ordinary_stop_does_not_warn(self):
+        seen = self.records()
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.start()
+        handler.stop(5)
+        self.assertEqual([r for r in seen if r.levelno >= logging.WARNING], [])
+
+    def test_a_task_whose_repr_raises_strands_nothing_behind_it(self):
+        seen = []
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.put_task(sys.exit, 3)
+        handler.put_task(_BadRepr().method)
+        handler.put_task(seen.append, "after")
+        self.records()
+        handler.start()
+        handler.join(5)
+        self.assertEqual(seen, ["after"])
+
+    def test_a_raising_task_whose_repr_raises_does_not_end_the_thread(self):
+        seen = self.records()
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.start()
+        self.addCleanup(handler.stop, 5)
+        handler.put_task(_BadRepr().raises)
+        self.assertTrue(_wait(lambda: seen, 5))
+        time.sleep(0.1)
+        self.assertTrue(handler.is_alive(), "the event thread ended")
+        self.assertEqual([r.levelno for r in seen], [logging.ERROR])
+
+    def test_what_was_queued_behind_an_exit_still_runs(self):
+        # The first exit ends run(); the rest goes to _drain, which must
+        # survive the second and still pass the third its arguments.
+        seen = []
+        handler = python_mpv_jsonipc.EventHandler()
+        handler.put_task(sys.exit, 3)
+        handler.put_task(sys.exit, 4)
+        handler.put_task(seen.append, "after")
+        with self.assertLogs("mpv-jsonipc", "ERROR") as logs:
+            handler.start()
+            handler.join(5)
+        self.assertFalse(handler.is_alive())
+        self.assertEqual(seen, ["after"])
+        self.assertTrue(any(r.exc_info and r.exc_info[0] is SystemExit
+                            for r in logs.records))
 
 
 if __name__ == "__main__":
